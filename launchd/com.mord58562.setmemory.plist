@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mord58562.setmemory</string>
+
+    <!-- ProgramArguments and log paths are template tokens (__PYTHON__,
+         __PROJECT_ROOT__) that install.sh substitutes with the real
+         absolute paths at install time. launchd doesn't expand $HOME,
+         so the rendered plist in ~/Library/LaunchAgents/ is the only
+         place that holds the user-specific paths - this template stays
+         portable across machines and clean of personal info. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>__PROJECT_ROOT__/set_memory.py</string>
+        <string>--on-mount</string>
+    </array>
+
+    <!-- Fire on every volume mount. set_memory.py checks the Pioneer path
+         and UUID before doing any work, so non-USB mounts are a fast no-op. -->
+    <key>StartOnMount</key>
+    <true/>
+
+    <!-- Do NOT fire at login - only on mount events. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__PROJECT_ROOT__/logs/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__PROJECT_ROOT__/logs/stderr.log</string>
+
+    <!-- Throttle: if the job exits non-zero, wait 10 seconds before
+         re-triggering. Avoids a tight loop on persistent errors. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>

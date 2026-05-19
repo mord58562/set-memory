@@ -1,0 +1,13 @@
+{
+  "forgotten_min_appearances": 5,
+  "forgotten_days_since_last": 90,
+  "forgotten_limit": 10,
+  "never_played_min_days_since_add": 30,
+  "never_played_limit": 10,
+  "usb_uuid": "deadbeef00000000deadbeef00000000",
+  "usb_pioneer_path": "/Volumes/TEST_USB/PIONEER",
+  "state_db_path": "state.db",
+  "digest_path": "digest.md",
+  "append_to_jury_digest": false,
+  "jury_digest_path": "~/Documents/cleanup-digest.md"
+}

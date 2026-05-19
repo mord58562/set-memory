@@ -1,0 +1,21 @@
+# User-edited config (holds USB UUID + paths specific to this machine)
+config.json
+
+# Runtime state and outputs
+state.db
+state.db-journal
+state.db-wal
+state.db-shm
+digest.md
+logs/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
