@@ -138,19 +138,27 @@ def test_ingest_fingerprint_survives_history_id_rename(
 
     Simulates an XDJ playlist rename (DESIGN D3).
     """
-    # Build a minimal synthetic db with one session
-    conn_a = sqlite3.connect(":memory:")
-    conn_a.row_factory = sqlite3.Row
-    conn_a.executescript("""
+    # Build a minimal synthetic db with one session. Schema mirrors the
+    # real rekordbox 6.x layout: ArtistID + KeyID on djmdContent, with
+    # djmdArtist + djmdKey holding the actual names.
+    schema = """
         CREATE TABLE djmdHistory (ID TEXT PRIMARY KEY, Seq INTEGER, Name TEXT,
             Attribute INTEGER, ParentID TEXT, DateCreated TEXT);
         CREATE TABLE djmdSongHistory (ID TEXT PRIMARY KEY, HistoryID TEXT,
             ContentID TEXT, TrackNo INTEGER);
-        CREATE TABLE djmdContent (ID TEXT PRIMARY KEY, Title TEXT, ArtistName TEXT,
-            BPM REAL, Tonality TEXT, ColorID INTEGER, DateCreated TEXT);
+        CREATE TABLE djmdArtist (ID TEXT PRIMARY KEY, Name TEXT);
+        CREATE TABLE djmdKey (ID TEXT PRIMARY KEY, ScaleName TEXT);
+        CREATE TABLE djmdContent (ID TEXT PRIMARY KEY, Title TEXT, ArtistID TEXT,
+            KeyID TEXT, BPM REAL, ColorID INTEGER, DateCreated TEXT);
+        INSERT INTO djmdArtist VALUES ('A1', 'Artist A');
+        INSERT INTO djmdKey VALUES ('K1', '5A');
+        INSERT INTO djmdContent VALUES ('C001', 'Track 1', 'A1', 'K1', 120.0, 7, '2025-01-01');
+    """
+    conn_a = sqlite3.connect(":memory:")
+    conn_a.row_factory = sqlite3.Row
+    conn_a.executescript(schema + """
         INSERT INTO djmdHistory VALUES ('H001', 1, '2025.09.01', 0, 'root', '2025-09-01');
         INSERT INTO djmdSongHistory VALUES ('SH001', 'H001', 'C001', 1);
-        INSERT INTO djmdContent VALUES ('C001', 'Track 1', 'Artist A', 120.0, '5A', 7, '2025-01-01');
     """)
     ingest_from_connection(conn_a, state_db, source_path="test")
     conn_a.close()
@@ -158,16 +166,9 @@ def test_ingest_fingerprint_survives_history_id_rename(
     # Second db: same tracks but different history ID (rename)
     conn_b = sqlite3.connect(":memory:")
     conn_b.row_factory = sqlite3.Row
-    conn_b.executescript("""
-        CREATE TABLE djmdHistory (ID TEXT PRIMARY KEY, Seq INTEGER, Name TEXT,
-            Attribute INTEGER, ParentID TEXT, DateCreated TEXT);
-        CREATE TABLE djmdSongHistory (ID TEXT PRIMARY KEY, HistoryID TEXT,
-            ContentID TEXT, TrackNo INTEGER);
-        CREATE TABLE djmdContent (ID TEXT PRIMARY KEY, Title TEXT, ArtistName TEXT,
-            BPM REAL, Tonality TEXT, ColorID INTEGER, DateCreated TEXT);
+    conn_b.executescript(schema + """
         INSERT INTO djmdHistory VALUES ('H999', 1, 'Renamed Session', 0, 'root', '2025-09-01');
         INSERT INTO djmdSongHistory VALUES ('SH001', 'H999', 'C001', 1);
-        INSERT INTO djmdContent VALUES ('C001', 'Track 1', 'Artist A', 120.0, '5A', 7, '2025-01-01');
     """)
     summary = ingest_from_connection(conn_b, state_db, source_path="test")
     conn_b.close()

@@ -77,6 +77,11 @@ def _build_synthetic_db(path: Path) -> None:
     conn = sqlite3.connect(str(path))
     cur = conn.cursor()
 
+    # Schema mirrors the real rekordbox 6.x layout: artist and key are
+    # normalised into their own tables, joined to djmdContent via
+    # ArtistID / KeyID. The earlier fixture inlined those fields as flat
+    # columns on djmdContent, which let queries like "SELECT ArtistName
+    # FROM djmdContent" pass tests but blow up against a real USB.
     cur.executescript("""
         CREATE TABLE djmdHistory (
             ID          TEXT PRIMARY KEY,
@@ -94,16 +99,35 @@ def _build_synthetic_db(path: Path) -> None:
             TrackNo     INTEGER
         );
 
+        CREATE TABLE djmdArtist (
+            ID          TEXT PRIMARY KEY,
+            Name        TEXT
+        );
+
+        CREATE TABLE djmdKey (
+            ID          TEXT PRIMARY KEY,
+            ScaleName   TEXT
+        );
+
         CREATE TABLE djmdContent (
             ID          TEXT PRIMARY KEY,
             Title       TEXT,
-            ArtistName  TEXT,
+            ArtistID    TEXT,
+            KeyID       TEXT,
             BPM         REAL,
-            Tonality    TEXT,
             ColorID     INTEGER,
             DateCreated TEXT
         );
     """)
+
+    # Seed five artists and one key so the JOINs in read_content have
+    # something to bind against; the real DB has many more but this is
+    # enough for deterministic test data.
+    cur.executemany(
+        "INSERT INTO djmdArtist (ID, Name) VALUES (?, ?)",
+        [(f"A{n}", f"Artist {n}") for n in range(1, 6)],
+    )
+    cur.execute("INSERT INTO djmdKey (ID, ScaleName) VALUES ('K001', '5A')")
 
     # Sessions
     sessions = [
@@ -119,14 +143,15 @@ def _build_synthetic_db(path: Path) -> None:
         sessions,
     )
 
-    # djmdContent rows (20 tracks)
+    # djmdContent rows (20 tracks). Artist is referenced by FK to
+    # djmdArtist; key is FK to djmdKey.
     content_rows = []
     for i in range(1, 21):
         cid = f"C{i:03d}"
         title = f"Track {i}"
-        artist = f"Artist {(i % 5) + 1}"
+        artist_id = f"A{(i % 5) + 1}"
+        key_id = "K001"
         bpm = 125.0 + i * 0.5
-        key = "5A"
         energy = (i % 10) + 1
         # Never-played tracks: C011-C015 old enough, C016-C020 too recent
         if i <= 10:
@@ -135,9 +160,9 @@ def _build_synthetic_db(path: Path) -> None:
             date_created = "2026-01-01"
         else:
             date_created = "2026-04-20"
-        content_rows.append((cid, title, artist, bpm, key, energy, date_created))
+        content_rows.append((cid, title, artist_id, key_id, bpm, energy, date_created))
     cur.executemany(
-        "INSERT INTO djmdContent (ID, Title, ArtistName, BPM, Tonality, ColorID, DateCreated) "
+        "INSERT INTO djmdContent (ID, Title, ArtistID, KeyID, BPM, ColorID, DateCreated) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         content_rows,
     )

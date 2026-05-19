@@ -103,8 +103,10 @@ def connect_master_db(path: str | Path, key: Optional[str] = None) -> sqlite3.Co
 
     When key is None: plain sqlite3 (used for synthetic test fixture and any
     unencrypted copy).
-    When key is provided: uses pysqlcipher3 to open a SQLCipher-encrypted db.
-    This is the single boundary between encrypted and unencrypted access.
+    When key is provided: uses sqlcipher3 (from sqlcipher3-wheels, the
+    package pyrekordbox 0.4+ depends on) to open a SQLCipher-encrypted
+    db. This is the single boundary between encrypted and unencrypted
+    access.
     """
     if key is None:
         conn = sqlite3.connect(str(path))
@@ -112,19 +114,29 @@ def connect_master_db(path: str | Path, key: Optional[str] = None) -> sqlite3.Co
         return conn
     else:
         try:
-            from pysqlcipher3 import dbapi2 as sqlcipher  # type: ignore[import]
-        except ImportError as exc:
-            raise ImportError(
-                "pysqlcipher3 is not installed. Run scripts/install.sh to set up "
-                "the full SQLCipher environment."
-            ) from exc
+            from sqlcipher3 import dbapi2 as sqlcipher  # type: ignore[import]
+        except ImportError:
+            # Fall back to the older pysqlcipher3 name in case the
+            # user has an alternative environment.
+            try:
+                from pysqlcipher3 import dbapi2 as sqlcipher  # type: ignore[import]
+            except ImportError as exc:
+                raise ImportError(
+                    "sqlcipher3 is not installed. Run scripts/install.sh "
+                    "(it pulls sqlcipher3-wheels in as a pyrekordbox dep)."
+                ) from exc
         conn = sqlcipher.connect(str(path))
+        # pyrekordbox passes the deobfuscated 64-char key as a passphrase
+        # and lets SQLCipher 4's defaults do the rest. Adding explicit
+        # cipher_page_size / kdf_iter / HMAC_SHA1 pragmas (which earlier
+        # versions of this code did, mimicking SQLCipher 3 tuning) makes
+        # sqlcipher3-wheels 0.5+ refuse to open the file with "file is
+        # not a database". Don't touch the defaults.
         conn.execute(f"PRAGMA key = '{key}'")
-        conn.execute("PRAGMA cipher_page_size = 4096")
-        conn.execute("PRAGMA kdf_iter = 64000")
-        conn.execute("PRAGMA cipher_hmac_algorithm = HMAC_SHA1")
-        conn.execute("PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA1")
-        conn.row_factory = sqlite3.Row
+        # Row factory from the SAME module as the connection - mixing
+        # sqlite3.Row with an sqlcipher3 cursor raises a TypeError at
+        # the first fetchone() call.
+        conn.row_factory = sqlcipher.Row
         return conn
 
 
@@ -186,10 +198,18 @@ def read_content(
     if not content_ids:
         return {}
     _require_tables(conn, ["djmdContent"])
+    # rekordbox normalises artist + key into separate tables. The
+    # earlier flat-column query (ArtistName, Tonality on djmdContent)
+    # was never the live schema - it only worked against the synthetic
+    # test fixture, which inlined those fields for convenience.
     placeholders = ",".join("?" * len(content_ids))
     rows = conn.execute(
-        f"SELECT ID, Title, ArtistName, BPM, Tonality, ColorID, DateCreated "
-        f"FROM djmdContent WHERE ID IN ({placeholders})",
+        f"SELECT c.ID, c.Title, a.Name AS ArtistName, c.BPM, "
+        f"       k.ScaleName AS Tonality, c.ColorID, c.DateCreated "
+        f"FROM djmdContent c "
+        f"LEFT JOIN djmdArtist a ON a.ID = c.ArtistID "
+        f"LEFT JOIN djmdKey    k ON k.ID = c.KeyID "
+        f"WHERE c.ID IN ({placeholders})",
         content_ids,
     ).fetchall()
     result: dict[str, RawTrack] = {}
@@ -420,57 +440,31 @@ def ingest_from_connection(
 
 def _get_pyrekordbox_key() -> str:
     """
-    Retrieve the SQLCipher key from pyrekordbox's cache.
+    Retrieve the SQLCipher key used to open rekordbox `master.db` files.
 
-    If the cache is absent or empty, attempts to download it from Pioneer's CDN.
-    Raises RuntimeError if the key cannot be obtained.
+    pyrekordbox >= 0.4 ships the key as an obfuscated blob inside the
+    package and exposes a deobfuscate helper; the older `pyrekordbox
+    download-key` CLI step is gone. We just call the helper. The key
+    is the same for every rekordbox install - it's a global constant
+    Pioneer uses for SQLCipher.
     """
     try:
-        import pyrekordbox  # type: ignore[import]
-        from pyrekordbox.config import get_config  # type: ignore[import]
+        from pyrekordbox.db6.database import BLOB, deobfuscate  # type: ignore[import]
     except ImportError as exc:
         raise RuntimeError(
             "pyrekordbox is not installed. Run scripts/install.sh first."
         ) from exc
 
-    import subprocess
-    import sys
-
-    # pyrekordbox stores the key in its config; try reading it first
-    try:
-        cfg = get_config()
-        key = getattr(cfg, "db_key", None) or getattr(cfg, "key", None)
-        if key:
-            return str(key)
-    except Exception:
-        pass
-
-    # Fallback: check the conventional cache file path
-    key_cache = Path.home() / ".pyrekordbox" / "key"
-    if key_cache.exists() and key_cache.stat().st_size > 0:
-        return key_cache.read_text(encoding="utf-8").strip()
-
-    # Cache missing - attempt download
-    log.info("SQLCipher key cache absent; attempting download from Pioneer CDN...")
-    result = subprocess.run(
-        [sys.executable, "-m", "pyrekordbox", "download-key"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
+    key = deobfuscate(BLOB)
+    if not key or not key.startswith("402fd"):
+        # Defensive: if a future pyrekordbox release changes the blob
+        # shape, fail loudly rather than passing a bogus key to
+        # SQLCipher (which would just say "file is not a database").
         raise RuntimeError(
-            f"Failed to download SQLCipher key: {result.stderr.strip()}. "
-            "Ensure you have network access and pyrekordbox is installed."
+            "pyrekordbox returned an unexpected key shape. "
+            "The package may have changed; check its release notes."
         )
-
-    # Re-check cache after download
-    if key_cache.exists() and key_cache.stat().st_size > 0:
-        return key_cache.read_text(encoding="utf-8").strip()
-
-    raise RuntimeError(
-        "download-key succeeded but key file not found at expected location. "
-        f"Checked: {key_cache}"
-    )
+    return key
 
 
 def _snapshot_usb_db(usb_db_path: Path, tmp_dir: Path) -> Path:

@@ -57,17 +57,19 @@ echo "[3/8] Installing pyrekordbox into miniconda3..."
 "$PIP" install pyrekordbox==0.4.4
 
 # ---------------------------------------------------------------------------
-# 4. Download the rekordbox SQLCipher key from Pioneer's CDN
+# 4. SQLCipher key (no-op for pyrekordbox >= 0.4)
 # ---------------------------------------------------------------------------
-echo "[4/8] Downloading rekordbox SQLCipher key from Pioneer CDN..."
-echo "      (This is a one-time network call; the key is cached at ~/.pyrekordbox/key)"
-"$PYTHON" -m pyrekordbox download-key
+echo "[4/8] Checking SQLCipher key access..."
+echo "      (pyrekordbox 0.4+ ships the key inside the package; no CDN download needed.)"
+"$PYTHON" -c "from pyrekordbox.db6.database import BLOB, deobfuscate; assert deobfuscate(BLOB).startswith('402fd')"
+echo "      Key access OK."
 
 # ---------------------------------------------------------------------------
-# 5. Install the SQLCipher adapter
+# 5. SQLCipher Python binding (sqlcipher3 ships with pyrekordbox via the
+#    sqlcipher3-wheels dependency on macOS arm64; no extra step needed).
 # ---------------------------------------------------------------------------
-echo "[5/8] Installing SQLCipher adapter for pyrekordbox..."
-"$PYTHON" -m pyrekordbox install-sqlcipher
+echo "[5/8] Verifying SQLCipher Python binding..."
+"$PYTHON" -c "from sqlcipher3 import dbapi2; print('      sqlcipher3 binding OK.')"
 
 # ---------------------------------------------------------------------------
 # 6. Verify USB schema (if a rekordbox drive is currently mounted)

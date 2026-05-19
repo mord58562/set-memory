@@ -53,23 +53,17 @@ Prerequisites: Homebrew, miniconda3 at `~/miniconda3/`.
 # Step 1: Install system SQLCipher library
 brew install sqlcipher
 
-# Step 2: Install pyrekordbox into miniconda3
+# Step 2: Install pyrekordbox into miniconda3 (pulls sqlcipher3-wheels
+# in as a dependency; no separate adapter build step needed)
 ~/miniconda3/bin/pip install pyrekordbox==0.4.4
 
-# Step 3: Download the rekordbox SQLCipher key from Pioneer's CDN (one-time)
-#   This is a one-time network call. The key is cached at ~/.pyrekordbox/key.
-#   On subsequent mounts, Set Memory reads the cache - no network needed.
-~/miniconda3/bin/python3 -m pyrekordbox download-key
-
-# Step 4: Install the SQLCipher adapter
-~/miniconda3/bin/python3 -m pyrekordbox install-sqlcipher
-
-# Step 5: Install the launchd agent and run the full setup
+# Step 3: Run the installer (verifies the toolchain, builds the
+# launchd plist, smoke-tests the pipeline)
 bash ~/Downloads/set-memory/scripts/install.sh
 ```
 
-After install, the launchd agent is live. Mount your USB drive to trigger
-the first real sync.
+After install, the launchd agent is live. Mount any rekordbox USB to
+trigger the first real sync.
 
 ---
 
@@ -140,26 +134,6 @@ RUN_SMOKE=1 ~/miniconda3/bin/pytest ~/Downloads/set-memory/tests/test_smoke.py -
 ---
 
 ## Troubleshooting
-
-### SQLCipher key fetch failure
-
-**Symptom:** digest.md contains "Key error" or logs show `RuntimeError: Failed to
-download SQLCipher key`.
-
-**Cause:** Pioneer's CDN was unreachable when `download-key` was called, OR
-the key cache at `~/.pyrekordbox/key` was deleted.
-
-**Fix:**
-```bash
-# Requires network access
-~/miniconda3/bin/python3 -m pyrekordbox download-key
-
-# Verify the cache exists and is non-empty
-cat ~/.pyrekordbox/key
-```
-
-If the CDN is permanently unreachable (Pioneer changes their distribution),
-check the pyrekordbox issue tracker for a manual key entry workaround.
 
 ### "Schema incompatibility" notification
 
