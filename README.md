@@ -27,14 +27,19 @@ All data stays on your machine (no cloud, no uploads).
 
 ## How it works
 
-1. You plug in your DJ USB drive.
+1. You plug in any rekordbox USB drive.
 2. macOS fires the launchd agent (`com.mord58562.setmemory`).
-3. Set Memory checks that it is your USB (via device UUID, not volume label).
-4. It opens the `master.db` on the USB (decrypted via SQLCipher + pyrekordbox)
-   and reads all `djmdHistory` sessions.
-5. New sessions (not yet in `state.db`) are ingested - their track appearances
-   are recorded by content ID.
-6. Forgotten-favourites and never-played lists are computed from `state.db`.
+3. Set Memory scans every mounted volume for `PIONEER/Master/master.db`.
+   Non-rekordbox volumes are ignored silently; multiple DJ drives mounted
+   at once are all processed in the same run.
+4. For each rekordbox USB, it opens `master.db` (decrypted via SQLCipher +
+   pyrekordbox) and reads `djmdHistory`.
+5. New sessions (not yet in `state.db`) are ingested by content fingerprint,
+   so re-mounting the same drive or two USBs mirroring each other never
+   double-count.
+6. Forgotten-favourites and never-played lists are computed across the
+   union of every session ever recorded, regardless of which drive it
+   came from.
 7. `digest.md` is written atomically. A macOS notification fires.
 8. Total expected runtime: under 10 seconds for a typical sync.
 
@@ -87,17 +92,14 @@ rm -rf ~/Downloads/set-memory/logs/
 
 ## Configuration
 
-On first run, Set Memory writes a default `config.json` next to the script.
-Open it and fill in two values before mounting your USB:
+There is no per-drive setup. Set Memory discovers any mounted volume that
+has a rekordbox library on it (`PIONEER/Master/master.db` + a `PIONEER/
+rekordbox/` export tree) and ingests sessions from each. Plug in a new
+USB and it just works; reformat or rename a drive and nothing breaks.
 
-- `usb_uuid` - the UUID inside `<USB>/PIONEER/DeviceLibBackup/rbDevLibBaInfo_*.json`.
-  Mount the drive once, run `cat /Volumes/*/PIONEER/DeviceLibBackup/rbDevLibBaInfo_*.json | grep -i uuid`,
-  and copy the value across.
-- `usb_pioneer_path` - the `/Volumes/<name>/PIONEER` folder on your drive.
-
-Until `usb_uuid` is set, Set Memory exits cleanly on mount with a log note;
-nothing is read or written. Changes take effect on the next mount - no
-restart needed.
+`config.json` holds only the analysis thresholds, written next to the
+script on first run. Changes take effect on the next mount, no restart
+needed.
 
 ```json
 {
@@ -106,8 +108,6 @@ restart needed.
   "forgotten_limit": 10,
   "never_played_min_days_since_add": 30,
   "never_played_limit": 10,
-  "usb_uuid": "<YOUR_USB_UUID>",
-  "usb_pioneer_path": "/Volumes/<YOUR_USB>/PIONEER",
   "state_db_path": "state.db",
   "digest_path": "digest.md",
   "append_to_jury_digest": false
@@ -195,10 +195,9 @@ The new file starts fresh (no history). Re-mounting the USB will re-ingest all
 
 ### USB volume label changed
 
-Not a problem. Set Memory identifies your USB by device UUID
-(`<YOUR_USB_UUID>`), not volume label. If you reformat
-and the UUID changes, update `usb_uuid` in `config.json` and run
-`install.sh` again to recheck the UUID.
+Not a problem. Set Memory walks `/Volumes/*` and only cares whether each
+volume has a rekordbox library on it. Renaming or reformatting a drive
+doesn't change behaviour.
 
 ---
 

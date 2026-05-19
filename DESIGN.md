@@ -132,8 +132,8 @@ The Python path must be the absolute miniconda3 path (not `python3` or a shebang
 
 | Failure | Behaviour |
 |---|---|
-| Volume mounts but `/Volumes/<YOUR_USB>/PIONEER/` absent | Exit 0 silently. This fires on every volume mount; non-USB mounts must be cheap to dismiss. |
-| UUID check fails (JSON not found or UUID mismatch) | Exit 0 silently. Not Rob's DJ USB. |
+| Mount fires but no volume in `/Volumes/*` has both `PIONEER/Master/master.db` and `PIONEER/rekordbox/` | Exit 0 silently. This fires on every volume mount; non-rekordbox mounts must be cheap to dismiss. |
+| One drive in a multi-drive run hits a WAL lock or schema mismatch | Skip that drive, append its label to the notification body, keep processing the others. One bad drive shouldn't lose work on the rest. |
 | `master.db` present but WAL lock detected (XDJ mid-write) | Wait 2 seconds, retry once. On second failure, log to stderr, write a digest noting "USB locked, skipped ingestion," fire notification: "USB locked - retry on next mount." |
 | SQLCipher key cache absent | Attempt download-key. If download fails (no network), write error to digest and notification. Do not crash. Exit 1 (signals launchd to record the failure). |
 | SQLCipher key present but decryption fails | Log full error. Write digest noting decryption failure. Notify. Exit 1. |
@@ -160,7 +160,7 @@ MIK does not provide play history, session data, or hot cue positions relevant t
 
 ### set_memory.py (entry point)
 
-Parses `--on-mount` flag. Calls `config.load()`, then runs the on-mount pipeline in sequence: UUID check, ingest, analyse, digest, notify. All errors caught at top level; any unhandled exception writes a fallback notification and exits 1. Designed to be a thin orchestrator - no business logic.
+Parses `--on-mount` flag. Calls `config.load()`, then runs the on-mount pipeline in sequence: discover rekordbox USBs across `/Volumes/*`, ingest each, analyse the union, write the digest, notify. All errors caught at top level; any unhandled exception writes a fallback notification and exits 1. Designed to be a thin orchestrator - no business logic.
 
 ### ingest.py
 
@@ -192,11 +192,9 @@ Reads `config.json` from the project directory. Returns a typed dataclass `Confi
 
 When launchd fires `set_memory.py --on-mount`:
 
-1. Check that `/Volumes/<YOUR_USB>/PIONEER/` exists. If not, exit 0 immediately.
+1. Load `config.json` (created with defaults if absent).
 
-2. Locate `rbDevLibBaInfo_*.json` under `/Volumes/<YOUR_USB>/PIONEER/DeviceLibBackup/`. Parse the UUID field. If the UUID does not match `<YOUR_USB_UUID>`, exit 0 silently.
-
-3. Load `config.json`. Create it with defaults if absent.
+2. Scan `/Volumes/*` for any volume that has both `PIONEER/Master/master.db` and a `PIONEER/rekordbox/` subtree. If none, exit 0 silently - the mount that triggered us isn't a rekordbox USB. Multiple matches mean multiple DJ drives are plugged in; each gets processed in the same run.
 
 4. Check `~/.pyrekordbox/key` (or pyrekordbox's resolved cache path). If absent or empty, run `python -m pyrekordbox download-key`. If that fails, write a digest noting the failure and fire a notification, then exit 1.
 
@@ -234,7 +232,7 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
--- Stores: schema_version, last_sync_at, last_usb_uuid
+-- Stores: schema_version, last_sync_at
 
 CREATE TABLE IF NOT EXISTS sessions (
     session_id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -327,7 +325,7 @@ Note: `DJPlayCount` from `djmdContent` is intentionally omitted. The RECON confi
 
 ### test_smoke.py (skipped unless `RUN_SMOKE=1` env var set)
 
-- `test_smoke_real_usb`: marks `pytest.mark.skipif(not usb_present, ...)`. If USB is mounted with correct UUID, runs the full on-mount pipeline and asserts: `digest.md` exists and is non-empty, notification body string is valid, state.db has at least one session row.
+- `test_smoke_real_usb`: marks `pytest.mark.skipif(not usb_present, ...)`. If a rekordbox USB is mounted (anywhere in `/Volumes/*`), runs the full on-mount pipeline and asserts: `digest.md` exists and is non-empty, notification body string is valid, state.db has at least one session row.
 
 ---
 
@@ -390,7 +388,7 @@ The RECON flags this explicitly. Set Memory does not use DJPlayCount anywhere. `
 
 **R5 - USB volume label change**
 
-Mitigated entirely by UUID-based identity check (D1, workflow step 2). Volume label is never used.
+Mitigated by the discovery scan: Set Memory walks `/Volumes/*` looking for the `PIONEER/Master/master.db` + `PIONEER/rekordbox/` shape rather than matching on label or UUID. Reformatting or renaming a drive keeps it working without any reconfiguration; new drives are picked up the moment they're plugged in.
 
 **R6 - state.db grows without bound over many years**
 

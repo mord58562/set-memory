@@ -229,8 +229,6 @@ def default_config() -> Config:
         forgotten_limit=10,
         never_played_min_days_since_add=30,
         never_played_limit=10,
-        usb_uuid="deadbeef00000000deadbeef00000000",
-        usb_pioneer_path="/Volumes/TEST_USB/PIONEER",
         state_db_path="state.db",
         digest_path="digest.md",
     )

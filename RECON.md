@@ -9,12 +9,12 @@ Date: 2026-05-12
 - Last modified June 30 2025 - **stale, no sync in nearly a year**.
 - Backups (`master.backup.db`, `master.backup2.db`) also June 30 2025, also encrypted.
 
-**USB `master.db`** (`/Volumes/<YOUR_USB>/PIONEER/Master/master.db`, 53.6 MB):
+**USB `master.db`** (`/Volumes/<your USB>/PIONEER/Master/master.db`, 53.6 MB on the drive this was reconned on):
 - Also SQLCipher-encrypted. Misidentified by `file` as "OpenPGP Public Key" - SQLCipher's page-level encryption produces non-standard magic bytes.
 - Last modified May 9 2026 (**active**). WAL file (`master.db-wal` 257 KB, May 11 2026) confirms live writes from XDJ-RX3.
 - 3 backups span May 2-May 9 2026 - hardware rotates backups per session.
 
-**`exportLibrary.db`** (`/Volumes/<YOUR_USB>/PIONEER/rekordbox/exportLibrary.db`, 221 KB) - also encrypted; secondary cache, not main DB.
+**`exportLibrary.db`** (`/Volumes/<your USB>/PIONEER/rekordbox/exportLibrary.db`, 221 KB) - also encrypted; secondary cache, not main DB.
 
 **Schema via pyrekordbox docs (confirmed against source)**:
 - `djmdContent` - main track table (~70 columns). Fields: `DJPlayCount` ("not sure if rekordbox plays count"), `DateCreated` (yyyy-mm-dd file creation), `StockDate` (purpose unclear), `ReleaseDate`. **No `LastPlayTime` field exists.**
@@ -62,9 +62,9 @@ Date: 2026-05-12
 ## 4. Sync Detection Mechanism
 
 **Recommended: launchd `StartOnMount`**.
-A launchd plist with `StartOnMount=true` fires on every volume mount. Script checks for `/Volumes/<YOUR_USB>/PIONEER/Master/master.db` before doing anything (safe for non-USB mounts). Native macOS, zero deps, instant.
+A launchd plist with `StartOnMount=true` fires on every volume mount. The script then scans `/Volumes/*` for any volume that has both `PIONEER/Master/master.db` and a `PIONEER/rekordbox/` subtree, ingests every match, and exits silently for mounts that don't fit the shape (memory cards, backup drives, etc.). Native macOS, zero deps, instant.
 
-Verify USB identity via `/Volumes/<YOUR_USB>/PIONEER/DeviceLibBackup/rbDevLibBaInfo_*.json` UUID (`<YOUR_USB_UUID>`) rather than volume label (exFAT reformat could change label).
+No identity check is needed: matching on the directory shape rather than a UUID means new drives, reformatted drives, and renamed drives all just work without configuration. Two simultaneously-mounted rekordbox USBs (e.g. a mirror) are both processed in the same run and dedup naturally via the content fingerprint.
 
 There's already one Pioneer launchd daemon on the system (`com.pioneerdj.FwUpdateManagerd.plist`) - same pattern.
 
@@ -132,7 +132,7 @@ Does not depend on Jury. May optionally append a "DJ section" to Jury's digest a
 
 **R4 - History creation conditional on Performance mode**: browse-only on XDJ doesn't write history. Expected behaviour.
 
-**R5 - USB volume label change**: detect by UUID in `rbDevLibBaInfo_*.json`, not label.
+**R5 - USB volume label change**: discovery scans by directory shape, not label or UUID, so label changes are invisible.
 
 **Q1 - Does djmdHistory on USB carry Mac-sync'd history or only hardware?** USB DB 53.6 MB vs Mac 1.49 MB → USB is primary library; Mac is subset. Likely USB carries full hardware history. Verify on first connection by listing all `djmdHistory` rows.
 

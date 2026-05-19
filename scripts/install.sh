@@ -70,32 +70,28 @@ echo "[5/8] Installing SQLCipher adapter for pyrekordbox..."
 "$PYTHON" -m pyrekordbox install-sqlcipher
 
 # ---------------------------------------------------------------------------
-# 6. Verify USB schema (if USB is mounted and config has a real path)
+# 6. Verify USB schema (if a rekordbox drive is currently mounted)
 # ---------------------------------------------------------------------------
-# Resolve usb_pioneer_path from config.json so the check follows whatever
-# the user has set, rather than a placeholder.
-USB_PIONEER_PATH="$(PROJECT_ROOT="$PROJECT_ROOT" "$PYTHON" -c "
-import os, sys
-sys.path.insert(0, os.environ['PROJECT_ROOT'])
-try:
-    import config
-    print(config.load().usb_pioneer_path)
-except Exception:
-    print('')
-" 2>/dev/null)"
-USB_MASTER="${USB_PIONEER_PATH}/Master/master.db"
-echo "[6/8] Checking USB master.db schema..."
-if [ -n "$USB_PIONEER_PATH" ] && [ -f "$USB_MASTER" ]; then
-    echo "      USB master.db found. Verifying djmd* tables..."
-    PROJECT_ROOT="$PROJECT_ROOT" USB_MASTER="$USB_MASTER" "$PYTHON" - <<'PYEOF'
+# Same discovery scan the launchd agent uses at runtime. No config to
+# consult; whichever drive happens to be plugged in gets checked.
+echo "[6/8] Checking rekordbox USB schema..."
+PROJECT_ROOT="$PROJECT_ROOT" "$PYTHON" - <<'PYEOF'
 import os, sys
 sys.path.insert(0, os.environ["PROJECT_ROOT"])
-import ingest
-import pyrekordbox
+import set_memory, ingest
 
+drives = set_memory.discover_rekordbox_usbs()
+if not drives:
+    print("      No rekordbox USB mounted - skipping schema check.")
+    print("      Plug one in any time to trigger the first sync.")
+    sys.exit(0)
+
+usb_master = drives[0]
+label = usb_master.parent.parent.parent.name
+print(f"      Found {len(drives)} drive(s); checking {label}...")
 try:
     key = ingest._get_pyrekordbox_key()
-    conn = ingest.connect_master_db(os.environ["USB_MASTER"], key=key)
+    conn = ingest.connect_master_db(str(usb_master), key=key)
     ingest._require_tables(conn, ['djmdHistory', 'djmdSongHistory', 'djmdContent'])
     count = conn.execute("SELECT COUNT(*) FROM djmdHistory").fetchone()[0]
     print(f"      Schema OK. djmdHistory has {count} row(s).")
@@ -104,10 +100,6 @@ except Exception as e:
     print(f"      Schema check FAILED: {e}", file=sys.stderr)
     sys.exit(1)
 PYEOF
-else
-    echo "      USB not mounted - skipping schema check."
-    echo "      Mount USB and re-run to verify schema before first live sync."
-fi
 
 # ---------------------------------------------------------------------------
 # 7. Create logs directory
@@ -146,12 +138,12 @@ cd "$PROJECT_ROOT"
 SMOKE_EXIT=$?
 echo "Exit code: $SMOKE_EXIT"
 
-if [ -n "$USB_PIONEER_PATH" ] && [ -d "$USB_PIONEER_PATH" ]; then
+if [ -s "$PROJECT_ROOT/digest.md" ]; then
     echo "Digest preview:"
-    cat "$PROJECT_ROOT/digest.md" 2>/dev/null || echo "(no digest.md yet)"
+    cat "$PROJECT_ROOT/digest.md"
 else
-    echo "USB not mounted - smoke test exited cleanly (expected)."
-    echo "Mount USB to trigger first real sync."
+    echo "No digest written yet (no rekordbox USB mounted, or no new sessions)."
+    echo "Plug in your DJ USB any time to trigger the first sync."
 fi
 
 echo ""

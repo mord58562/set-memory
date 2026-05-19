@@ -19,14 +19,15 @@ log = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent
 CONFIG_PATH = PROJECT_ROOT / "config.json"
 
-# Default USB UUID from RECON (device-specific; change in config.json if USB changes)
-_DEFAULT_USB_UUID = ""
-
 
 class ConfigError(Exception):
     """Raised when config.json contains an invalid type or unrecognised value."""
 
 
+# Drives are discovered, not configured. On every mount, set_memory.py
+# scans /Volumes/*/PIONEER/Master/master.db and ingests anything it
+# finds, so multiple DJ USBs accumulate into the same state.db without
+# the user having to know or paste device UUIDs.
 DEFAULTS: dict[str, Any] = {
     # Forgotten-favourites thresholds
     # Q4 note: DESIGN recommends 3 for lower-frequency players; default 5 means
@@ -38,9 +39,6 @@ DEFAULTS: dict[str, Any] = {
     # Never-played-after-add thresholds
     "never_played_min_days_since_add": 30,
     "never_played_limit": 10,
-    # USB identity
-    "usb_uuid": _DEFAULT_USB_UUID,
-    "usb_pioneer_path": "/Volumes/PIONEER",
     # state.db location (relative to project root unless absolute)
     "state_db_path": "state.db",
     # digest.md location
@@ -56,8 +54,6 @@ _TYPE_MAP: dict[str, type] = {
     "forgotten_limit": int,
     "never_played_min_days_since_add": int,
     "never_played_limit": int,
-    "usb_uuid": str,
-    "usb_pioneer_path": str,
     "state_db_path": str,
     "digest_path": str,
     "append_to_jury_digest": bool,
@@ -72,8 +68,6 @@ class Config:
     forgotten_limit: int = 10
     never_played_min_days_since_add: int = 30
     never_played_limit: int = 10
-    usb_uuid: str = _DEFAULT_USB_UUID
-    usb_pioneer_path: str = "/Volumes/PIONEER"
     state_db_path: str = "state.db"
     digest_path: str = "digest.md"
     append_to_jury_digest: bool = False
@@ -98,7 +92,10 @@ def load(config_path: Path = CONFIG_PATH) -> Config:
     """
     Load config.json, create with defaults if absent, validate types.
 
-    Raises ConfigError on type mismatch. Never silently ignores bad values.
+    Raises ConfigError on type mismatch. Unrecognised keys are ignored
+    (so an old config.json with usb_uuid / usb_pioneer_path stays
+    loadable after the auto-discovery refactor; the fields are simply
+    no longer read).
     """
     if not config_path.exists():
         log.info("config.json not found at %s - creating with defaults", config_path)
@@ -119,8 +116,6 @@ def load(config_path: Path = CONFIG_PATH) -> Config:
         forgotten_limit=int(merged["forgotten_limit"]),
         never_played_min_days_since_add=int(merged["never_played_min_days_since_add"]),
         never_played_limit=int(merged["never_played_limit"]),
-        usb_uuid=str(merged["usb_uuid"]),
-        usb_pioneer_path=str(merged["usb_pioneer_path"]),
         state_db_path=str(merged["state_db_path"]),
         digest_path=str(merged["digest_path"]),
         append_to_jury_digest=bool(merged["append_to_jury_digest"]),

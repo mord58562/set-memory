@@ -5,6 +5,13 @@ Thin orchestrator. No business logic here - delegates to ingest, analyse,
 digest, notify. All errors are caught at top level; any unhandled exception
 writes a fallback notification and exits 1.
 
+Discovery model: every USB mount fires launchd, which calls this entry
+point with --on-mount. The script scans /Volumes/*/PIONEER/Master/master.db,
+ingests anything it finds, and exits silently for mounts that aren't
+rekordbox USBs (no PIONEER folder). Multiple DJ USBs accumulate into
+the same state.db; sessions are deduplicated by content fingerprint, so
+re-mounting or mirrored drives never double-count.
+
 Usage:
   python set_memory.py --on-mount
 """
@@ -13,9 +20,7 @@ from __future__ import annotations
 
 import argparse
 import glob
-import json
 import logging
-import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -57,6 +62,33 @@ def main() -> int:
     return _run_on_mount()
 
 
+def discover_rekordbox_usbs(volumes_root: Path = Path("/Volumes")) -> list[Path]:
+    """
+    Return every currently mounted volume that has a rekordbox library
+    on it, as a list of master.db paths. A drive counts as rekordbox-
+    bearing if it has both PIONEER/Master/master.db and PIONEER/rekordbox/
+    on disk. We deliberately don't filter by volume name or UUID - users
+    rename drives, reformat them, swap them out, and the tool should
+    pick up whatever is plugged in without configuration.
+    """
+    if not volumes_root.exists():
+        return []
+    found: list[Path] = []
+    for vol in volumes_root.iterdir():
+        if not vol.is_dir():
+            continue
+        pioneer = vol / "PIONEER"
+        master_db = pioneer / "Master" / "master.db"
+        rekordbox_dir = pioneer / "rekordbox"
+        # Require BOTH master.db and the rekordbox subfolder. A bare
+        # /PIONEER/ on a random drive (e.g. a backup folder a user
+        # happens to have created) without the rekordbox export tree
+        # isn't a real DJ drive.
+        if master_db.is_file() and rekordbox_dir.is_dir():
+            found.append(master_db)
+    return sorted(found)
+
+
 def _run_on_mount() -> int:
     """Execute the on-mount pipeline. Returns exit code (0=success, 1=error)."""
     # Deferred imports so the entry point is fast to parse
@@ -66,7 +98,7 @@ def _run_on_mount() -> int:
     import digest
     import notify
 
-    # Step 1: Check USB pioneer path
+    # Step 1: Load config
     try:
         conf = cfg_module.load()
     except cfg_module.ConfigError as exc:
@@ -74,39 +106,16 @@ def _run_on_mount() -> int:
         notify.fire("Set Memory", "Config error - check logs.")
         return 1
 
-    # Step 1a: First-run guard. Empty usb_uuid means the user hasn't set up
-    # their device yet. Exit 0 with a clear message rather than failing later
-    # on an unrelated mount or crashing on the UUID check.
-    if not conf.usb_uuid:
-        log.info(
-            "usb_uuid is empty in config.json. Set it to your USB's device "
-            "UUID (see README) before Set Memory can identify your drive. "
-            "Exiting 0."
-        )
+    # Step 2: Discover rekordbox USBs across all mounted volumes
+    usb_db_paths = discover_rekordbox_usbs()
+    if not usb_db_paths:
+        log.info("No rekordbox USB mounted - exiting silently.")
         return 0
+    log.info("Found %d rekordbox USB(s): %s",
+             len(usb_db_paths),
+             ", ".join(str(p.parent.parent.parent) for p in usb_db_paths))
 
-    pioneer_path = Path(conf.usb_pioneer_path)
-    if not pioneer_path.exists():
-        log.info(
-            "Pioneer path %s not found - not the configured USB or USB not mounted. Exiting 0.",
-            pioneer_path,
-        )
-        return 0
-
-    # Step 2: UUID check
-    device_backup_dir = pioneer_path / "DeviceLibBackup"
-    if not _check_uuid(device_backup_dir, conf.usb_uuid):
-        log.info("UUID mismatch or not found - not the configured DJ USB. Exiting 0.")
-        return 0
-
-    # Step 3: Locate USB master.db
-    usb_db_path = pioneer_path / "Master" / "master.db"
-    if not usb_db_path.exists():
-        log.warning("master.db not found at %s", usb_db_path)
-        notify.fire("Set Memory", "master.db not found on USB.")
-        return 1
-
-    # Step 4: Open / create state.db
+    # Step 3: Open / create state.db
     state_db_path = conf.resolved_state_db()
     try:
         state_conn = _open_state_db(state_db_path)
@@ -115,37 +124,46 @@ def _run_on_mount() -> int:
         notify.fire("Set Memory", "state.db error - check logs.")
         return 1
 
-    # Step 5-9: Ingest from USB
-    try:
-        ingest_summary = ingest.ingest_from_usb(usb_db_path, state_conn)
-    except ingest.WalLockError as exc:
-        log.error("USB WAL lock: %s", exc)
-        _write_error_digest(
-            conf.resolved_digest(),
-            "USB locked - retry on next mount.",
-        )
-        notify.fire("Set Memory", "USB locked - retry on next mount.")
-        state_conn.close()
-        return 1
-    except ingest.SchemaError as exc:
-        log.error("Schema incompatibility: %s", exc)
-        notify.fire("Set Memory", "Schema error - check logs.")
-        state_conn.close()
-        return 1
-    except RuntimeError as exc:
-        # SQLCipher key fetch failure
-        log.error("Key/decryption error: %s", exc)
-        _write_error_digest(conf.resolved_digest(), str(exc))
-        notify.fire("Set Memory", "Key error - check logs.")
-        state_conn.close()
-        return 1
-    except Exception as exc:
-        log.exception("Unexpected ingest error: %s", exc)
-        notify.fire("Set Memory", "Ingest error - check logs.")
+    # Step 4: Ingest each discovered USB. Collect per-USB summaries
+    # so the analysis + digest can report the total work done in
+    # one run. A per-USB failure (locked WAL, decryption error,
+    # schema drift) is logged and the loop continues - one bad
+    # drive shouldn't abort the others.
+    combined_summary = None
+    per_usb_errors: list[str] = []
+    for usb_db_path in usb_db_paths:
+        usb_label = usb_db_path.parent.parent.parent.name  # /Volumes/<label>
+        try:
+            usb_summary = ingest.ingest_from_usb(usb_db_path, state_conn)
+            log.info("[%s] %d new session(s) ingested.",
+                     usb_label, usb_summary.sessions_new)
+            combined_summary = _merge_summary(combined_summary, usb_summary)
+        except ingest.WalLockError as exc:
+            log.warning("[%s] WAL lock: %s", usb_label, exc)
+            per_usb_errors.append(f"{usb_label}: locked (eject cleanly and replug)")
+        except ingest.SchemaError as exc:
+            log.warning("[%s] Schema incompatibility: %s", usb_label, exc)
+            per_usb_errors.append(f"{usb_label}: rekordbox schema not recognised")
+        except RuntimeError as exc:
+            # SQLCipher key fetch failure - applies to every USB this run
+            log.error("Key/decryption error: %s", exc)
+            _write_error_digest(conf.resolved_digest(), str(exc))
+            notify.fire("Set Memory", "Key error - check logs.")
+            state_conn.close()
+            return 1
+        except Exception as exc:
+            log.exception("[%s] Unexpected ingest error: %s", usb_label, exc)
+            per_usb_errors.append(f"{usb_label}: {exc}")
+
+    # If every USB failed, surface that as a notification.
+    if combined_summary is None:
+        log.warning("Every USB ingest failed.")
+        notify.fire("Set Memory",
+                    f"USB ingest failed ({len(per_usb_errors)} drive(s)) - check logs.")
         state_conn.close()
         return 1
 
-    # Step 10: Analyse
+    # Step 5: Analyse
     try:
         analysis = analyse.run(
             state_conn=state_conn,
@@ -164,14 +182,14 @@ def _run_on_mount() -> int:
 
     state_conn.close()
 
-    # Step 11-12: Write digest
+    # Step 6: Write digest
     config_snippet = (
         f"appeared >= {conf.forgotten_min_appearances} times, "
         f"last seen > {conf.forgotten_days_since_last} days ago"
     )
     try:
         notification_body = digest.render(
-            summary=ingest_summary,
+            summary=combined_summary,
             analysis=analysis,
             stats=stats,
             config_snippet=config_snippet,
@@ -182,50 +200,42 @@ def _run_on_mount() -> int:
         notify.fire("Set Memory", "Digest error - check logs.")
         return 1
 
-    # Step 13: Notify
+    # Step 7: Notify. Per-USB errors get appended to the body so
+    # the user notices a partial failure without having to open the log.
+    if per_usb_errors:
+        notification_body += f"\n{len(per_usb_errors)} drive(s) failed."
     notify.fire("Set Memory", notification_body)
 
     log.info(
         "Done. %d new session(s), %d forgotten track(s). Digest: %s",
-        ingest_summary.sessions_new,
+        combined_summary.sessions_new,
         len(analysis.forgotten),
         conf.resolved_digest(),
     )
     return 0
 
 
-def _check_uuid(device_backup_dir: Path, expected_uuid: str) -> bool:
+def _merge_summary(existing, new):
     """
-    Check that the USB device UUID matches the expected value.
-
-    Reads rbDevLibBaInfo_*.json under device_backup_dir and looks for the
-    UUID field. Returns False if the directory is absent, no JSON is found,
-    or the UUID does not match.
+    Combine two ingest summaries into one. The summary type comes from
+    ingest.py and is a simple dataclass; we widen the totals additively
+    so the digest can report "N new sessions" across every USB in one
+    run rather than emitting one digest per drive.
     """
-    if not device_backup_dir.exists():
-        return False
-    pattern = str(device_backup_dir / "rbDevLibBaInfo_*.json")
-    matches = glob.glob(pattern)
-    if not matches:
-        log.warning("No rbDevLibBaInfo_*.json found in %s", device_backup_dir)
-        return False
-    for json_path in matches:
-        try:
-            with open(json_path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            # The UUID may be stored under various keys; try common ones
-            uuid_val = (
-                data.get("uuid")
-                or data.get("UUID")
-                or data.get("deviceUUID")
-                or data.get("libraryUUID")
-                or ""
-            )
-            if uuid_val.lower().replace("-", "") == expected_uuid.lower().replace("-", ""):
-                return True
-        except Exception as exc:
-            log.warning("Could not parse %s: %s", json_path, exc)
-    return False
+    if existing is None:
+        return new
+    # Both summaries are simple dataclasses with integer counters and
+    # list fields. Replace with the union; ingest produces these so we
+    # mirror its shape rather than importing the type here.
+    existing.sessions_new = getattr(existing, "sessions_new", 0) + getattr(new, "sessions_new", 0)
+    existing.sessions_seen = getattr(existing, "sessions_seen", 0) + getattr(new, "sessions_seen", 0)
+    existing.appearances_inserted = getattr(existing, "appearances_inserted", 0) + getattr(new, "appearances_inserted", 0)
+    existing.tracks_upserted = getattr(existing, "tracks_upserted", 0) + getattr(new, "tracks_upserted", 0)
+    # Extend list-typed fields if they exist
+    for attr in ("new_session_ids",):
+        if hasattr(existing, attr) and hasattr(new, attr):
+            getattr(existing, attr).extend(getattr(new, attr))
+    return existing
 
 
 def _open_state_db(state_db_path: Path) -> sqlite3.Connection:
