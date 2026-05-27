@@ -658,6 +658,161 @@ def _snapshot_usb_db(usb_db_path: Path, tmp_dir: Path) -> Path:
     return dest
 
 
+def ingest_from_pdb(
+    pdb_path: Path,
+    state_conn: sqlite3.Connection,
+    volume_label: Optional[str] = None,
+    ingested_at: Optional[str] = None,
+) -> IngestSummary:
+    """
+    Ingest a CDJ-exported PIONEER/rekordbox/export.pdb into state.db.
+
+    Same end-state as ingest_from_usb (tracks + sessions + appearances +
+    usb_drives rows), but parses the DeviceSQL binary format directly
+    instead of going through SQLCipher. The .pdb schema is poorer than
+    master.db: no per-track color/energy, no StockDate, no cue rows, no
+    history-playlist dates. Missing fields land as NULL.
+    """
+    import pdb_reader  # local import: avoids penalty when only master.db is used
+
+    if ingested_at is None:
+        ingested_at = datetime.now(timezone.utc).isoformat()
+
+    _apply_schema(state_conn)
+
+    parsed = pdb_reader.read_pdb(pdb_path)
+    pdb_tracks: dict[int, pdb_reader.PdbTrack] = parsed["tracks"]
+    pdb_artists: dict[int, str] = parsed["artists"]
+    pdb_keys: dict[int, str] = parsed["keys"]
+    pdb_sessions: list[pdb_reader.PdbSession] = parsed["sessions"]
+
+    source_path = str(pdb_path)
+
+    # ---- library sync ----
+    existing_in_library = {
+        row[0] for row in state_conn.execute(
+            "SELECT content_id FROM tracks WHERE in_library = 1"
+        ).fetchall()
+    }
+    library_added = 0
+    for pt in pdb_tracks.values():
+        cid = str(pt.track_id)
+        if cid not in existing_in_library:
+            library_added += 1
+        artist = pdb_artists.get(pt.artist_id)
+        key_name = pdb_keys.get(pt.key_id)
+        raw = RawTrack(
+            content_id=cid,
+            title=pt.title,
+            artist=artist,
+            bpm=pt.bpm,                         # already real BPM from pdb_reader
+            key_camelot=key_name,
+            energy=None,                        # not in .pdb schema
+            date_created=pt.date_added,
+            stock_date=None,                    # not in .pdb schema
+        )
+        _upsert_library_track(state_conn, raw, ingested_at, cue_counts={})
+    state_conn.commit()
+    library_size = len(pdb_tracks)
+
+    # ---- sessions ----
+    existing_fingerprints: set[str] = {
+        row[0]
+        for row in state_conn.execute("SELECT fingerprint FROM sessions").fetchall()
+    }
+
+    summary = IngestSummary(
+        sessions_found=len(pdb_sessions),
+        library_size=library_size,
+        library_added=library_added,
+    )
+
+    for sess in pdb_sessions:
+        content_ids = [str(tid) for tid in sess.track_ids]
+        fingerprint = compute_fingerprint(content_ids)
+
+        if fingerprint in existing_fingerprints:
+            summary.sessions_skipped += 1
+            continue
+
+        # .pdb history_playlist_row has no date; fall back to the ingest
+        # timestamp so sessions still sort chronologically by ingest order.
+        session_date = ingested_at
+
+        cur = state_conn.execute(
+            "INSERT INTO sessions "
+            "(raw_history_id, fingerprint, session_date, source_db_path, ingested_at, track_count) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                str(sess.history_id), fingerprint, session_date,
+                source_path, ingested_at, len(sess.track_ids),
+            ),
+        )
+        session_id = cur.lastrowid
+        existing_fingerprints.add(fingerprint)
+        summary.sessions_new += 1
+        summary.new_session_ids.append(session_id)
+
+        for track_no, tid in enumerate(sess.track_ids, start=1):
+            cid = str(tid)
+            pt = pdb_tracks.get(tid)
+            title = pt.title if pt else None
+            artist = pdb_artists.get(pt.artist_id) if pt else None
+
+            state_conn.execute(
+                "INSERT INTO appearances (session_id, content_id, track_no, title, artist) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, cid, track_no, title, artist),
+            )
+            state_conn.execute(
+                "INSERT INTO tracks "
+                "(content_id, title, artist, bpm, key_camelot, energy, date_created, "
+                " stock_date, first_seen_session, last_seen_session, total_appearances) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1) "
+                "ON CONFLICT(content_id) DO UPDATE SET "
+                "  last_seen_session = excluded.last_seen_session, "
+                "  first_seen_session = COALESCE(tracks.first_seen_session, excluded.first_seen_session), "
+                "  total_appearances = tracks.total_appearances + 1, "
+                "  title = COALESCE(excluded.title, tracks.title), "
+                "  artist = COALESCE(excluded.artist, tracks.artist)",
+                (
+                    cid, title, artist,
+                    pt.bpm if pt else None,
+                    pdb_keys.get(pt.key_id) if pt else None,
+                    None,
+                    pt.date_added if pt else None,
+                    None,
+                    session_id, session_id,
+                ),
+            )
+
+        state_conn.commit()
+        log.info(
+            "Ingested pdb session %s (%s, %d tracks) -> state session_id %d",
+            sess.history_id, sess.name, len(sess.track_ids), session_id,
+        )
+
+    if volume_label:
+        state_conn.execute(
+            "INSERT INTO usb_drives "
+            "(volume_label, master_db_path, first_seen_at, last_seen_at, last_sync_at, library_size) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(volume_label) DO UPDATE SET "
+            "  master_db_path = excluded.master_db_path, "
+            "  last_seen_at = excluded.last_seen_at, "
+            "  last_sync_at = excluded.last_sync_at, "
+            "  library_size = excluded.library_size",
+            (volume_label, source_path, ingested_at, ingested_at, ingested_at, library_size),
+        )
+
+    state_conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync_at', ?)",
+        (ingested_at,),
+    )
+    state_conn.commit()
+    return summary
+
+
 def ingest_from_usb(
     usb_db_path: Path,
     state_conn: sqlite3.Connection,

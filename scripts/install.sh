@@ -10,6 +10,7 @@
 #   6. Creates the logs/ directory
 #   7. Installs the launchd agent plist
 #   8. Runs a smoke test
+#   9. Builds and installs the SwiftUI GUI (SetMemory.app)
 #
 # DO NOT run this script with sudo. It installs into the user's miniconda3
 # and ~/Library/LaunchAgents, both of which are user-owned.
@@ -134,6 +135,22 @@ echo "      Plist installed at: $PLIST_DST"
 # Load the agent
 launchctl bootstrap gui/"$(id -u)" "$PLIST_DST"
 echo "      launchd agent loaded."
+
+# ---------------------------------------------------------------------------
+# 9. Build + install the SwiftUI GUI (SetMemory.app)
+# ---------------------------------------------------------------------------
+if [ -x "$PROJECT_ROOT/gui/build.sh" ]; then
+    echo "[9/9] Building SetMemory.app (SwiftUI GUI)..."
+    ( cd "$PROJECT_ROOT/gui" && ./build.sh )
+    if [ -d "$PROJECT_ROOT/gui/SetMemory.app" ]; then
+        rm -rf "/Applications/SetMemory.app"
+        cp -R "$PROJECT_ROOT/gui/SetMemory.app" "/Applications/SetMemory.app"
+        echo "      SetMemory.app installed to /Applications/."
+        open "/Applications/SetMemory.app" || true
+    fi
+else
+    echo "[9/9] No gui/build.sh found - skipping GUI build."
+fi
 
 # ---------------------------------------------------------------------------
 # Smoke test

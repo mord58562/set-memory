@@ -22,6 +22,7 @@ import logging
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Optional
 
 PROJECT_ROOT = Path(__file__).parent
 
@@ -41,6 +42,9 @@ def main() -> int:
     sub = parser.add_subparsers(dest="cmd")
     parser.add_argument("--on-mount", action="store_true",
                         help="Run the on-mount pipeline (called by launchd on USB mount)")
+    parser.add_argument("--volume", type=str, default=None,
+                        help="If set, ingest only from this /Volumes/<label> USB. "
+                             "Without this flag every mounted rekordbox USB is ingested.")
 
     q = sub.add_parser("query", help="Print an analysis to stdout against current state.db")
     q.add_argument("kind", choices=[
@@ -59,7 +63,7 @@ def main() -> int:
     if args.cmd == "query":
         return _run_query(args)
     if args.on_mount:
-        return _run_on_mount()
+        return _run_on_mount(volume_filter=args.volume)
     parser.print_help()
     return 1
 
@@ -67,9 +71,14 @@ def main() -> int:
 def discover_rekordbox_usbs(volumes_root: Path = Path("/Volumes")) -> list[Path]:
     """
     Return every mounted volume that has a rekordbox library on it, as a
-    list of master.db paths. A drive counts as rekordbox-bearing if it has
-    both PIONEER/Master/master.db and PIONEER/rekordbox/ on disk. No label
-    matching - renaming or reformatting a drive doesn't change behaviour.
+    list of paths to the library file (either master.db or export.pdb).
+
+    Two layouts are accepted:
+      - Desktop-rekordbox export: PIONEER/Master/master.db (SQLCipher).
+      - CDJ export mode:          PIONEER/rekordbox/export.pdb (DeviceSQL).
+
+    No label matching - renaming or reformatting a drive doesn't change
+    behaviour. master.db takes priority if both are present (richer schema).
     """
     if not volumes_root.exists():
         return []
@@ -79,12 +88,15 @@ def discover_rekordbox_usbs(volumes_root: Path = Path("/Volumes")) -> list[Path]
             continue
         master_db = vol / "PIONEER" / "Master" / "master.db"
         rekordbox_dir = vol / "PIONEER" / "rekordbox"
+        export_pdb = rekordbox_dir / "export.pdb"
         if master_db.is_file() and rekordbox_dir.is_dir():
             found.append(master_db)
+        elif export_pdb.is_file():
+            found.append(export_pdb)
     return sorted(found)
 
 
-def _run_on_mount() -> int:
+def _run_on_mount(volume_filter: Optional[str] = None) -> int:
     import config as cfg_module
     import ingest
     import analyse
@@ -99,10 +111,13 @@ def _run_on_mount() -> int:
         return 1
 
     usb_db_paths = discover_rekordbox_usbs()
+    if volume_filter:
+        usb_db_paths = [p for p in usb_db_paths
+                        if p.parent.parent.parent.name == volume_filter]
     if not usb_db_paths:
-        log.info("No rekordbox USB mounted - exiting silently.")
+        log.info("No matching CDJ-export USB mounted - exiting silently.")
         return 0
-    log.info("Found %d rekordbox USB(s): %s", len(usb_db_paths),
+    log.info("Found %d CDJ-export USB(s): %s", len(usb_db_paths),
              ", ".join(str(p.parent.parent.parent) for p in usb_db_paths))
 
     state_db_path = conf.resolved_state_db()
@@ -118,10 +133,16 @@ def _run_on_mount() -> int:
     any_success = False
     for usb_db_path in usb_db_paths:
         usb_label = usb_db_path.parent.parent.parent.name
+        is_pdb = usb_db_path.name.endswith(".pdb")
         try:
-            usb_summary = ingest.ingest_from_usb(
-                usb_db_path, state_conn, volume_label=usb_label,
-            )
+            if is_pdb:
+                usb_summary = ingest.ingest_from_pdb(
+                    usb_db_path, state_conn, volume_label=usb_label,
+                )
+            else:
+                usb_summary = ingest.ingest_from_usb(
+                    usb_db_path, state_conn, volume_label=usb_label,
+                )
             log.info("[%s] %d new session(s) ingested. Library: %d.",
                      usb_label, usb_summary.sessions_new, usb_summary.library_size)
             combined.merge(usb_summary)
@@ -199,10 +220,29 @@ def _run_on_mount() -> int:
         notification_body += f" {len(per_usb_errors)} drive(s) failed."
     notify.fire("Set Memory", notification_body, open_path=conf.resolved_digest())
 
+    # Launch / surface the GUI so Rob can see results without hunting for
+    # the digest file. `open -g` brings the app foreground only if it was
+    # already running; the bare form lifts it into focus on first launch
+    # of a session, which matches "I just plugged in, show me the stuff".
+    _surface_gui_app()
+
     log.info("Done. %d new session(s), %d forgotten, %d prep issue(s). Digest: %s",
              combined.sessions_new, len(analysis.forgotten),
              len(analysis.prep_issues), conf.resolved_digest())
     return 0
+
+
+def _surface_gui_app() -> None:
+    """Open SetMemory.app if it exists. -g (background) so the dock icon
+    bounces without stealing focus from whatever Rob is doing."""
+    import subprocess
+    app_path = "/Applications/SetMemory.app"
+    if not Path(app_path).exists():
+        return
+    try:
+        subprocess.run(["open", "-g", app_path], check=False, timeout=5)
+    except Exception as exc:
+        log.debug("Couldn't surface SetMemory.app: %s", exc)
 
 
 # ---------------------------------------------------------------------------

@@ -28,7 +28,34 @@ Results land in `~/Downloads/set-memory/digest.md` and fire a macOS
 notification (clickable when `terminal-notifier` is installed, which the
 installer adds). All data stays on your machine.
 
-A CLI is available for tweaking thresholds without remounting:
+## GUI
+
+`scripts/install.sh` builds and installs **SetMemory.app**, a native
+SwiftUI window app at `/Applications/SetMemory.app`. The app reads
+`state.db` directly (plain SQLite - the SQLCipher boundary stays in
+Python), auto-refreshes whenever the launchd agent writes a new digest,
+and offers all of the analyses above in a three-pane layout:
+
+- **Sidebar:** every surface (Forgotten / Recent / Never / Prep /
+  Together / Distribution / USB Drives / Sessions / Possibly Deleted)
+  with live row counts.
+- **Centre:** the active surface as a sortable table or chart, with a
+  one-line description so you don't have to memorise what each section
+  means.
+- **Right:** detail pane with all metadata for the selected track,
+  plus copy-title / copy-artist / copy-"title - artist" buttons.
+
+Top toolbar: live search box, mounted-USB indicator (green when a
+rekordbox USB is currently plugged in), Sync Now button (greyed until
+a USB is mounted), last-sync relative time, and a Settings sheet for
+every threshold. Settings write back to `config.json` so the launchd
+agent picks them up on the next mount.
+
+Cmd-R = Sync now. Cmd-Shift-R = re-read state.db without syncing.
+
+## CLI
+
+A CLI is also available for tweaking thresholds without remounting:
 
 ```bash
 ~/miniconda3/bin/python ~/Downloads/set-memory/set_memory.py query forgotten
@@ -39,6 +66,41 @@ A CLI is available for tweaking thresholds without remounting:
 ```
 
 ---
+
+## What's new in 0.4.0
+
+- **CDJ-export USBs (`.pdb`) now ingestable.** The original release only
+  read the legacy `PIONEER/Master/master.db` (SQLCipher) layout. Modern
+  rekordbox exports to `PIONEER/rekordbox/export.pdb` (Pioneer's
+  reverse-engineered DeviceSQL format), and the existing pyrekordbox
+  couldn't touch it. New pure-Python `pdb_reader.py` (no extra pip
+  deps) parses the .pdb directly; discovery accepts either layout and
+  dispatches to the right ingest path automatically.
+- **GUI overhaul against the AI-design-tells ban list.** Custom
+  wordmark, dense rekordbox-inspired row layout, inline-expand on
+  selection (no separate inspector pane), bottom status bar with all
+  stats (no sidebar footer), collapsible sidebar groups (Library /
+  Patterns / Maintenance), split-role accents (cyan = selection,
+  amber = action, coral = danger), tempo-coloured BPM column,
+  Camelot-wheel-coloured key chips, deliberately tight spacing.
+- **USB picker.** Multiple CDJ USBs mounted? Sync targets one or all,
+  selectable from the top bar.
+- **App auto-surfaces on USB mount.** When launchd fires the ingest,
+  Set Memory opens in the background dock so results are one click
+  away.
+
+## What's new in 0.3.0
+
+- **Native SwiftUI GUI.** Set Memory now ships with
+  `/Applications/SetMemory.app`: three-pane window with sidebar
+  surfaces, live search, table views per analysis, distribution charts
+  (BPM histogram, Camelot key bars, monthly sparkline), a track-detail
+  inspector with copy-to-clipboard, a Sync Now toolbar button (live
+  mounted-USB indicator), and an inline Settings sheet for every
+  threshold. App reads `state.db` directly via plain SQLite; auto-
+  refreshes whenever the launchd agent writes a new digest.
+- `scripts/install.sh` now builds + installs the GUI alongside the
+  launchd agent.
 
 ## What's new in 0.2.0
 
