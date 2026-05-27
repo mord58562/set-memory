@@ -246,15 +246,22 @@ def _run_on_mount(volume_filter: Optional[str] = None) -> int:
         notify.fire("Set Memory", "Digest error - check logs.")
         return 1
 
+    # Notifications are now strictly opt-in: the GUI is the surface for
+    # routine results. We only fire a system notification when something
+    # actually needs interrupting the user:
+    #   - per-USB failure (a drive Rob plugged in didn't work)
+    #   - first-ever sync (welcome moment so Rob notices the GUI now has data)
+    # Everything else stays silent; the GUI re-renders live via its
+    # state.db file watcher.
+    is_first_sync = stats.get("total_sessions", 0) == combined.sessions_new
     if per_usb_errors:
-        notification_body += f" {len(per_usb_errors)} drive(s) failed."
-    notify.fire("Set Memory", notification_body, open_path=conf.resolved_digest())
-
-    # Launch / surface the GUI so Rob can see results without hunting for
-    # the digest file. `open -g` brings the app foreground only if it was
-    # already running; the bare form lifts it into focus on first launch
-    # of a session, which matches "I just plugged in, show me the stuff".
-    _surface_gui_app()
+        body = f"{len(per_usb_errors)} drive(s) failed to sync."
+        notify.fire("Set Memory", body, open_path=conf.resolved_digest())
+    elif is_first_sync and combined.sessions_new > 0:
+        notify.fire("Set Memory",
+                    f"First sync: {combined.sessions_new} session(s), "
+                    f"{combined.library_size} track(s) in library. Click to open.",
+                    open_path=Path("/Applications/SetMemory.app"))
 
     log.info("Done. %d new session(s), %d forgotten, %d prep issue(s). Digest: %s",
              combined.sessions_new, len(analysis.forgotten),
