@@ -1,9 +1,8 @@
-// MakeAppIcon.swift - generates Resources/AppIcon.icns at build time.
-// Run via: swift Tools/MakeAppIcon.swift Resources/AppIcon.icns
-//
-// Design: cassette / dual-USB hybrid on a deep near-black tile with a
-// teal accent disc. Two reels suggest the two streams of data Set Memory
-// surfaces - your library, and your sessions. Hand-built, no SF Symbols.
+// MakeAppIcon.swift - generates Resources/AppIcon.icns
+// Concept: a single off-white circle (record / jog wheel) on a deep
+// near-black tile, with one cyan dot at 2 o'clock representing a
+// saved memory cue. Three elements, readable at 16pt. No spokes,
+// no wordmark, no notch - just the metaphor.
 
 import AppKit
 import Foundation
@@ -11,92 +10,74 @@ import Foundation
 let output = CommandLine.arguments.dropFirst().first ?? "AppIcon.icns"
 let sizes = [16, 32, 64, 128, 256, 512, 1024]
 
-let bg     = NSColor(srgbRed: 0x0E/255, green: 0x10/255, blue: 0x14/255, alpha: 1)
-let ink    = NSColor(srgbRed: 0xEC/255, green: 0xEE/255, blue: 0xF1/255, alpha: 1)
-let teal   = NSColor(srgbRed: 0x4E/255, green: 0xCD/255, blue: 0xC4/255, alpha: 1)
-let amber  = NSColor(srgbRed: 0xE8/255, green: 0x98/255, blue: 0x49/255, alpha: 1)
+let bg   = NSColor(srgbRed: 0x0B/255, green: 0x0D/255, blue: 0x11/255, alpha: 1)
+let ink  = NSColor(srgbRed: 0xEE/255, green: 0xF0/255, blue: 0xF4/255, alpha: 1)
+let cyan = NSColor(srgbRed: 0x4F/255, green: 0xB4/255, blue: 0xC7/255, alpha: 1)
+let strokeColor = NSColor(srgbRed: 0x23/255, green: 0x28/255, blue: 0x32/255, alpha: 1)
 
 func drawIcon(size: CGFloat) -> NSImage {
     let img = NSImage(size: NSSize(width: size, height: size))
     img.lockFocus()
-    let ctx = NSGraphicsContext.current!
-    ctx.cgContext.setShouldAntialias(true)
-    ctx.cgContext.setAllowsAntialiasing(true)
+    NSGraphicsContext.current!.cgContext.setShouldAntialias(true)
 
+    // Tile - rounded square
     let inset: CGFloat = size * 0.10
-    let radius: CGFloat = size * 0.22
+    let radius: CGFloat = size * 0.225
     let rect = NSRect(x: inset, y: inset, width: size - inset * 2, height: size - inset * 2)
-
-    // Tile background
-    let bgPath = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+    let tile = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
     bg.setFill()
-    bgPath.fill()
-
-    // Subtle inner stroke
-    let strokeColor = NSColor(srgbRed: 0x3A/255, green: 0x42/255, blue: 0x50/255, alpha: 1)
+    tile.fill()
     strokeColor.setStroke()
-    bgPath.lineWidth = max(1, size * 0.006)
-    bgPath.stroke()
+    tile.lineWidth = max(0.5, size * 0.004)
+    tile.stroke()
 
-    // Teal accent corner (top-right notch as a small triangle)
-    let notchSize = size * 0.16
-    let notchPath = NSBezierPath()
-    notchPath.move(to: NSPoint(x: rect.maxX - notchSize, y: rect.maxY))
-    notchPath.line(to: NSPoint(x: rect.maxX, y: rect.maxY))
-    notchPath.line(to: NSPoint(x: rect.maxX, y: rect.maxY - notchSize))
-    notchPath.close()
-    teal.withAlphaComponent(0.9).setFill()
-    notchPath.fill()
-
-    // Two reels (the data-stream metaphor)
-    let centerY = rect.midY - size * 0.02
-    let reelSize = size * 0.30
-    let reelGap = size * 0.08
-    let leftCenter = NSPoint(x: rect.midX - reelSize/2 - reelGap/2, y: centerY)
-    let rightCenter = NSPoint(x: rect.midX + reelSize/2 + reelGap/2, y: centerY)
-
-    for (i, c) in [leftCenter, rightCenter].enumerated() {
-        let outer = NSBezierPath(ovalIn: NSRect(x: c.x - reelSize/2,
-                                                y: c.y - reelSize/2,
-                                                width: reelSize, height: reelSize))
-        ink.setFill()
-        outer.fill()
-
-        // Inner cutout (hub)
-        let hub = NSBezierPath(ovalIn: NSRect(x: c.x - reelSize/6,
-                                              y: c.y - reelSize/6,
-                                              width: reelSize/3, height: reelSize/3))
-        bg.setFill()
-        hub.fill()
-
-        // Spokes (subtle, suggesting motion)
-        let spokeColor = (i == 0) ? teal : amber
-        spokeColor.withAlphaComponent(0.85).setStroke()
-        for angle in stride(from: 0.0, to: .pi * 2, by: .pi / 3) {
-            let ca = CGFloat(Darwin.cos(angle))
-            let sa = CGFloat(Darwin.sin(angle))
-            let path = NSBezierPath()
-            path.move(to: NSPoint(x: c.x + ca * reelSize * 0.18,
-                                  y: c.y + sa * reelSize * 0.18))
-            path.line(to: NSPoint(x: c.x + ca * reelSize * 0.42,
-                                  y: c.y + sa * reelSize * 0.42))
-            path.lineWidth = max(1, size * 0.012)
-            path.stroke()
-        }
+    // Record disc - thick ring (not solid; suggests vinyl)
+    let centre = NSPoint(x: rect.midX, y: rect.midY)
+    let discR  = rect.width * 0.36
+    let hubR   = rect.width * 0.06
+    let ring = NSBezierPath(ovalIn: NSRect(x: centre.x - discR, y: centre.y - discR,
+                                           width: discR * 2, height: discR * 2))
+    ink.setFill()
+    ring.fill()
+    // Centre hole
+    let hub = NSBezierPath(ovalIn: NSRect(x: centre.x - hubR, y: centre.y - hubR,
+                                          width: hubR * 2, height: hubR * 2))
+    bg.setFill()
+    hub.fill()
+    // Single faint groove (echo of vinyl grooves) - 8% inset from outer edge
+    if size >= 64 {
+        let gr1R = discR * 0.78
+        let groove = NSBezierPath(ovalIn: NSRect(x: centre.x - gr1R, y: centre.y - gr1R,
+                                                 width: gr1R * 2, height: gr1R * 2))
+        bg.withAlphaComponent(0.55).setStroke()
+        groove.lineWidth = max(0.5, size * 0.008)
+        groove.stroke()
     }
 
-    // "SM" wordmark below the reels (only at larger sizes)
-    if size >= 64 {
-        let label = "S·M" as NSString
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: size * 0.10, weight: .semibold),
-            .foregroundColor: NSColor(srgbRed: 0x9B/255, green: 0xA2/255, blue: 0xAE/255, alpha: 1),
-            .kern: size * 0.014,
-        ]
-        let labelSize = label.size(withAttributes: attrs)
-        label.draw(at: NSPoint(x: rect.midX - labelSize.width/2,
-                               y: rect.minY + size * 0.08),
-                   withAttributes: attrs)
+    // The memory cue - one cyan dot at 1 o'clock (NE), slightly inside
+    // the disc rim. Single saturated mark; the whole concept of the app.
+    let angle: CGFloat = .pi * 0.30          // ~54deg from x-axis = ~1 o'clock
+    let cueR  = discR * 0.86                 // sit just inside the rim
+    let dotR  = max(1.2, size * 0.045)
+    let dotCentre = NSPoint(x: centre.x + cos(angle) * cueR,
+                            y: centre.y + sin(angle) * cueR)
+    let dot = NSBezierPath(ovalIn: NSRect(x: dotCentre.x - dotR,
+                                          y: dotCentre.y - dotR,
+                                          width: dotR * 2, height: dotR * 2))
+    cyan.setFill()
+    dot.fill()
+
+    // At very large sizes only, a faint thin line from hub to the cue
+    // dot - reading head pointing at the memory. Subtle.
+    if size >= 256 {
+        let line = NSBezierPath()
+        line.move(to: NSPoint(x: centre.x + cos(angle) * (hubR + size * 0.005),
+                              y: centre.y + sin(angle) * (hubR + size * 0.005)))
+        line.line(to: NSPoint(x: centre.x + cos(angle) * (cueR - dotR - size * 0.005),
+                              y: centre.y + sin(angle) * (cueR - dotR - size * 0.005)))
+        cyan.withAlphaComponent(0.35).setStroke()
+        line.lineWidth = max(0.5, size * 0.005)
+        line.stroke()
     }
 
     img.unlockFocus()

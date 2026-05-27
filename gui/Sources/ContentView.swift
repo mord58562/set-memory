@@ -8,56 +8,13 @@ struct ContentView: View {
     let section: SidebarSection
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            ScrollView {
-                surface
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
-            }
-            .background(Theme.bg)
+        ScrollView {
+            surface
+                .padding(.horizontal, 0)
+                .padding(.top, 0)
+                .padding(.bottom, 12)
         }
         .background(Theme.bg)
-    }
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text(section.title.uppercased())
-                    .font(Type.micro).tracking(1.6)
-                    .foregroundColor(Theme.ink2)
-                if let n = count {
-                    Text("\(n)")
-                        .font(Type.data)
-                        .foregroundColor(Theme.ink3)
-                }
-                Spacer()
-            }
-            Text(section.helperText)
-                .font(Type.body)
-                .foregroundColor(Theme.ink3)
-        }
-        .padding(.horizontal, 18)
-        .padding(.top, 14)
-        .padding(.bottom, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var count: Int? {
-        switch section {
-        case .forgotten:      return state.forgotten.count
-        case .recentUnplayed: return state.recentUnplayed.count
-        case .neverPlayed:    return state.neverPlayed.count
-        case .prep:           return state.prepIssues.count
-        case .together:       return state.coAppearance.count
-        case .deleted:        return state.deletedCandidates.count
-        case .usb:            return state.usbDrives.count
-        case .sessions:       return state.sessions.count
-        case .search:
-            let t = state.searchTerm.trimmingCharacters(in: .whitespaces)
-            return t.isEmpty ? nil : state.searchResults.count
-        case .distribution:   return nil
-        }
     }
 
     @ViewBuilder
@@ -448,33 +405,26 @@ struct BpmRamp: View {
     let buckets: [(label: String, count: Int)]
     let total: Int
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("TEMPO PROFILE").font(Type.micro).tracking(1.4).foregroundColor(Theme.ink2)
-                Spacer()
-                Text("\(total) PLAYS").font(Type.micro).tracking(1.0).foregroundColor(Theme.ink3)
-            }
-            VStack(spacing: 6) {
-                ForEach(buckets, id: \.label) { b in
-                    let color = (Theme.tempoRamp.first { $0.label == b.label }?.color) ?? Theme.ink3
-                    HStack(spacing: 10) {
-                        Text(b.label)
-                            .font(Type.data)
-                            .foregroundColor(color)
-                            .frame(width: 60, alignment: .leading)
-                        GeometryReader { geo in
-                            let pct = total == 0 ? 0 : Double(b.count) / Double(total)
-                            ZStack(alignment: .leading) {
-                                Rectangle().fill(Theme.surface)
-                                Rectangle().fill(color)
-                                    .frame(width: max(2, geo.size.width * pct))
-                            }
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(buckets, id: \.label) { b in
+                let color = (Theme.tempoRamp.first { $0.label == b.label }?.color) ?? Theme.ink3
+                HStack(spacing: 10) {
+                    Text(b.label)
+                        .font(Type.data)
+                        .foregroundColor(color)
+                        .frame(width: 60, alignment: .leading)
+                    GeometryReader { geo in
+                        let pct = total == 0 ? 0 : Double(b.count) / Double(total)
+                        ZStack(alignment: .leading) {
+                            Rectangle().fill(Theme.surface)
+                            Rectangle().fill(color)
+                                .frame(width: max(2, geo.size.width * pct))
                         }
-                        .frame(height: 8)
-                        Text("\(b.count) · \(pctString(b.count, total))")
-                            .font(Type.data).foregroundColor(Theme.mono)
-                            .frame(width: 100, alignment: .trailing)
                     }
+                    .frame(height: 8)
+                    Text("\(b.count) · \(pctString(b.count, total))")
+                        .font(Type.data).foregroundColor(Theme.mono)
+                        .frame(width: 100, alignment: .trailing)
                 }
             }
         }
@@ -485,29 +435,22 @@ struct KeyBars: View {
     let keys: [(key: String, count: Int)]
     let total: Int
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("TOP CAMELOT KEYS").font(Type.micro).tracking(1.4).foregroundColor(Theme.ink2)
-                Spacer()
-                Text("\(total) PLAYS").font(Type.micro).tracking(1.0).foregroundColor(Theme.ink3)
-            }
-            VStack(spacing: 6) {
-                ForEach(keys.prefix(10), id: \.key) { k in
-                    HStack(spacing: 10) {
-                        CamelotChip(key: k.key).frame(width: 50, alignment: .leading)
-                        GeometryReader { geo in
-                            let pct = total == 0 ? 0 : Double(k.count) / Double(total)
-                            ZStack(alignment: .leading) {
-                                Rectangle().fill(Theme.surface)
-                                Rectangle().fill(Theme.cyan)
-                                    .frame(width: max(2, geo.size.width * pct))
-                            }
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(keys.prefix(10), id: \.key) { k in
+                HStack(spacing: 10) {
+                    CamelotChip(key: k.key).frame(width: 50, alignment: .leading)
+                    GeometryReader { geo in
+                        let pct = total == 0 ? 0 : Double(k.count) / Double(total)
+                        ZStack(alignment: .leading) {
+                            Rectangle().fill(Theme.surface)
+                            Rectangle().fill(Theme.cyan)
+                                .frame(width: max(2, geo.size.width * pct))
                         }
-                        .frame(height: 8)
-                        Text("\(k.count)")
-                            .font(Type.data).foregroundColor(Theme.mono)
-                            .frame(width: 50, alignment: .trailing)
                     }
+                    .frame(height: 8)
+                    Text("\(k.count)")
+                        .font(Type.data).foregroundColor(Theme.mono)
+                        .frame(width: 50, alignment: .trailing)
                 }
             }
         }
@@ -518,13 +461,7 @@ struct MonthSpark: View {
     let values: [(String, Int)]
     var body: some View {
         let peak = max(1, values.map { $0.1 }.max() ?? 1)
-        let total = values.reduce(0) { $0 + $1.1 }
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("SESSIONS PER MONTH").font(Type.micro).tracking(1.4).foregroundColor(Theme.ink2)
-                Spacer()
-                Text("\(total) TOTAL · PEAK \(peak)/MO").font(Type.micro).tracking(1.0).foregroundColor(Theme.ink3)
-            }
+        VStack(alignment: .leading, spacing: 4) {
             GeometryReader { geo in
                 let barW = max(4, geo.size.width / CGFloat(max(values.count, 1)) - 3)
                 HStack(alignment: .bottom, spacing: 3) {

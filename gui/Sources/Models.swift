@@ -130,19 +130,4 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .deleted:        return "trash"
         }
     }
-
-    var helperText: String {
-        switch self {
-        case .forgotten:      return "Tracks you played often, but haven't touched for a while. Loved + neglected."
-        case .recentUnplayed: return "Tracks added recently that haven't made it into a set yet. Buy-regret check."
-        case .neverPlayed:    return "Old library residents that have never appeared in any recorded session."
-        case .prep:           return "Library tracks missing BPM, key, or hot cues. Sorted most-played first."
-        case .together:       return "Track pairs that keep showing up in the same sessions. Set-planning fuel."
-        case .distribution:   return "Histogram of plays across BPM buckets and Camelot keys. Set-diversity awareness."
-        case .usb:            return "Every drive Set Memory has seen, with last-mounted timestamp and library size."
-        case .search:         return "Type to search every track Set Memory has ever ingested - in library or not."
-        case .sessions:       return "Every session in state.db, newest first. Click one to see its tracks."
-        case .deleted:        return "Tracks recorded in state.db that no longer appear in any recently-synced library."
-        }
-    }
 }

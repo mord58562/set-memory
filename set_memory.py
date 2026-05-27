@@ -58,10 +58,35 @@ def main() -> int:
     q.add_argument("--since", type=str, default=None,
                    help="ISO date (YYYY-MM-DD) - only return rows newer than this")
 
+    cp = sub.add_parser(
+        "create-playlist",
+        help="Create a playlist in Mac rekordbox 6 from a Set Memory surface.",
+    )
+    cp.add_argument("name", help="Playlist name to create in rekordbox.")
+    cp.add_argument(
+        "--kind",
+        choices=["forgotten", "never-played", "recent-unplayed", "prep",
+                 "together", "deleted"],
+        default=None,
+        help="Pull canonical IDs from this analysis surface.",
+    )
+    cp.add_argument(
+        "--content-ids",
+        type=str,
+        default=None,
+        help="Comma-separated Set Memory canonical content IDs (alternative to --kind).",
+    )
+    cp.add_argument(
+        "--limit", type=int, default=None,
+        help="Override the configured limit when using --kind.",
+    )
+
     args = parser.parse_args()
 
     if args.cmd == "query":
         return _run_query(args)
+    if args.cmd == "create-playlist":
+        return _run_create_playlist(args)
     if args.on_mount:
         return _run_on_mount(volume_filter=args.volume)
     parser.print_help()
@@ -119,6 +144,11 @@ def _run_on_mount(volume_filter: Optional[str] = None) -> int:
         return 0
     log.info("Found %d CDJ-export USB(s): %s", len(usb_db_paths),
              ", ".join(str(p.parent.parent.parent) for p in usb_db_paths))
+
+    # Surface the GUI immediately on mount so Rob sees Set Memory the
+    # moment he plugs a USB in - not 5s later when ingest finishes. The
+    # app's state.db file watcher repaints automatically when sync writes.
+    _surface_gui_app()
 
     state_db_path = conf.resolved_state_db()
     try:
@@ -382,6 +412,152 @@ def _query_usb(conn: sqlite3.Connection, analyse_module) -> int:
         print(f"{d['volume_label']:30}  last seen {d['last_seen_at'][:19]}  "
               f"{d['library_size']:>4} tracks")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# create-playlist subcommand
+# ---------------------------------------------------------------------------
+
+def _run_create_playlist(args: argparse.Namespace) -> int:
+    """
+    Push a Set Memory track list into Mac rekordbox 6 as a new playlist.
+    Emits a JSON document to stdout on success; non-zero exit on any
+    error, with a JSON error envelope on stdout for the GUI to parse.
+    """
+    import json
+    import config as cfg_module
+    import rekordbox_writer
+
+    if not args.kind and not args.content_ids:
+        print(json.dumps({"error": "Provide --kind or --content-ids."}))
+        return 2
+    if args.kind and args.content_ids:
+        print(json.dumps({"error": "Use --kind OR --content-ids, not both."}))
+        return 2
+
+    try:
+        conf = cfg_module.load()
+    except cfg_module.ConfigError as exc:
+        print(json.dumps({"error": f"Config error: {exc}"}))
+        return 1
+
+    state_db_path = conf.resolved_state_db()
+    if not state_db_path.exists():
+        print(json.dumps({"error": f"No state.db at {state_db_path}."}))
+        return 1
+
+    warnings: list[str] = []
+    if args.content_ids:
+        content_ids = [s.strip() for s in args.content_ids.split(",") if s.strip()]
+    else:
+        try:
+            content_ids = _content_ids_for_kind(args.kind, conf, state_db_path,
+                                                args.limit, warnings)
+        except Exception as exc:
+            print(json.dumps({"error": f"Failed to load {args.kind} surface: {exc}"}))
+            return 1
+    if not content_ids:
+        print(json.dumps({"error": "No track IDs to add (surface was empty)."}))
+        return 1
+
+    try:
+        result = rekordbox_writer.create_playlist(
+            name=args.name,
+            set_memory_content_ids=content_ids,
+            state_db_path=state_db_path,
+        )
+    except rekordbox_writer.RekordboxLocked as exc:
+        print(json.dumps({"error": str(exc), "code": "rekordbox_locked"}))
+        return 3
+    except rekordbox_writer.RekordboxNotFound as exc:
+        print(json.dumps({"error": str(exc), "code": "rekordbox_not_found"}))
+        return 4
+    except rekordbox_writer.TrackMatchProblem as exc:
+        print(json.dumps({
+            "error": str(exc),
+            "code": "no_tracks_matched",
+            "unmatched_count": len(exc.dedup_keys_not_found),
+        }))
+        return 5
+    except Exception as exc:
+        log.exception("Unexpected playlist write error")
+        print(json.dumps({"error": f"Unexpected error: {exc}"}))
+        return 1
+
+    payload = {
+        "playlist_id": result["playlist_id"],
+        "tracks_added": result["tracks_added"],
+        "unmatched": result["unmatched_count"],
+        "backup_path": result.get("backup_path"),
+        "warnings": warnings,
+    }
+    print(json.dumps(payload))
+    return 0
+
+
+def _content_ids_for_kind(
+    kind: str, conf, state_db_path: Path, limit: Optional[int],
+    warnings: list[str],
+) -> list[str]:
+    """Extract canonical content IDs for the named analysis surface."""
+    import analyse
+
+    conn = sqlite3.connect(str(state_db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        result = analyse.run(
+            state_conn=conn,
+            forgotten_min_appearances=conf.forgotten_min_appearances,
+            forgotten_days_since_last=conf.forgotten_days_since_last,
+            forgotten_limit=limit or conf.forgotten_limit,
+            never_played_min_days_since_add=conf.never_played_min_days_since_add,
+            never_played_limit=limit or conf.never_played_limit,
+            recently_added_window_days=conf.recently_added_window_days,
+            recently_added_limit=limit or conf.recently_added_limit,
+            prep_limit=limit or conf.prep_limit,
+            co_appearance_min_sessions=conf.co_appearance_min_sessions,
+            co_appearance_limit=limit or conf.co_appearance_limit,
+            deleted_stale_days=conf.deleted_stale_days,
+            deleted_limit=limit or conf.deleted_limit,
+            sparkline_months=conf.sparkline_months,
+        )
+    finally:
+        conn.close()
+
+    if kind == "forgotten":
+        return [t.content_id for t in result.forgotten]
+    if kind == "never-played":
+        return [t.content_id for t in result.never_played]
+    if kind == "recent-unplayed":
+        return [t.content_id for t in result.recently_added_unplayed]
+    if kind == "prep":
+        return [p.content_id for p in result.prep_issues]
+    if kind == "deleted":
+        return [d.content_id for d in result.deleted_candidates]
+    if kind == "together":
+        # CoAppearancePair stores titles, not IDs. Re-resolve via state.db.
+        conn = sqlite3.connect(str(state_db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            ids: list[str] = []
+            seen: set[str] = set()
+            for p in result.co_appearance:
+                for title, artist in ((p.a_title, p.a_artist), (p.b_title, p.b_artist)):
+                    if not title:
+                        continue
+                    row = conn.execute(
+                        "SELECT content_id FROM tracks "
+                        "WHERE title = ? AND artist = ? LIMIT 1",
+                        (title, artist),
+                    ).fetchone()
+                    if row and row["content_id"] not in seen:
+                        seen.add(row["content_id"])
+                        ids.append(row["content_id"])
+            return ids
+        finally:
+            conn.close()
+    warnings.append(f"Unknown kind: {kind}")
+    return []
 
 
 # ---------------------------------------------------------------------------
