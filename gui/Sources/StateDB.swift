@@ -12,9 +12,12 @@ final class StateDB {
     init(path: String) throws {
         self.path = path
         var h: OpaquePointer?
-        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI
-        let uri = "file:\(path)?mode=ro"
-        let rc = sqlite3_open_v2(uri, &h, flags, nil)
+        // Open read-write (not READONLY) so SQLite can create the WAL/SHM
+        // sidecar files it needs to open a WAL-mode db. We never issue
+        // mutating statements; the lock+create rights are only for SQLite's
+        // own bookkeeping.
+        let flags = SQLITE_OPEN_READWRITE
+        let rc = sqlite3_open_v2(path, &h, flags, nil)
         guard rc == SQLITE_OK, let h else {
             let msg = String(cString: sqlite3_errmsg(h))
             sqlite3_close(h)
