@@ -42,11 +42,13 @@ class Suggestion:
 # ---------------------------------------------------------------------------
 
 def generate_all(state_conn: sqlite3.Connection,
-                 limit_per_kind: int = 5) -> list[Suggestion]:
+                 limit_per_kind: int = 5,
+                 include_dismissed: bool = False) -> list[Suggestion]:
     """
     Run every suggestion algorithm against state.db and return all
-    suggestions sorted by score desc. Use limit_per_kind to cap the
-    number of clique/seed suggestions surfaced (they tend to be plentiful).
+    suggestions sorted by score desc. Dismissed suggestion ids are
+    excluded by default; pass include_dismissed=True to surface them
+    (used by the GUI's "Show dismissed" toggle).
     """
     out: list[Suggestion] = []
     out.append(_forgotten_pack(state_conn))
@@ -57,8 +59,45 @@ def generate_all(state_conn: sqlite3.Connection,
     out.extend(_key_chains(state_conn, limit=limit_per_kind))
     out.append(_bpm_ramp(state_conn))
     out = [s for s in out if s and s.content_ids]
+    if not include_dismissed:
+        dismissed = dismissed_ids(state_conn)
+        out = [s for s in out if s.id not in dismissed]
     out.sort(key=lambda s: s.score, reverse=True)
     return out
+
+
+def dismissed_ids(state_conn: sqlite3.Connection) -> set[str]:
+    rows = state_conn.execute(
+        "SELECT suggestion_id FROM dismissed_suggestions"
+    ).fetchall()
+    return {str(r[0]) for r in rows}
+
+
+def dismiss(state_conn: sqlite3.Connection, suggestion_id: str) -> None:
+    """Hide a suggestion from future generate_all() calls."""
+    import datetime
+    state_conn.execute(
+        "INSERT OR REPLACE INTO dismissed_suggestions "
+        "(suggestion_id, dismissed_at) VALUES (?, ?)",
+        (suggestion_id, datetime.datetime.now(datetime.timezone.utc).isoformat()),
+    )
+    state_conn.commit()
+
+
+def undismiss(state_conn: sqlite3.Connection, suggestion_id: str) -> None:
+    """Unhide one suggestion."""
+    state_conn.execute(
+        "DELETE FROM dismissed_suggestions WHERE suggestion_id = ?",
+        (suggestion_id,),
+    )
+    state_conn.commit()
+
+
+def clear_dismissed(state_conn: sqlite3.Connection) -> int:
+    """Drop every dismissal; returns the count."""
+    cur = state_conn.execute("DELETE FROM dismissed_suggestions")
+    state_conn.commit()
+    return cur.rowcount
 
 
 # ---------------------------------------------------------------------------

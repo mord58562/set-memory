@@ -42,10 +42,11 @@ struct ContentView: View {
 struct SuggestionsPanel: View {
     @EnvironmentObject var state: AppState
     var body: some View {
-        if state.suggestions.isEmpty {
+        if state.suggestions.isEmpty && !state.showDismissedSuggestions {
             EmptyState(message: "No suggestions yet. Plug in a CDJ USB and sync to seed.")
         } else {
             LazyVStack(spacing: 10) {
+                topBar
                 if let last = state.lastPlaylistResult {
                     HStack {
                         Image(systemName: "checkmark.circle.fill")
@@ -59,13 +60,47 @@ struct SuggestionsPanel: View {
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(Theme.surface)
                 }
-                ForEach(state.suggestions) { s in
-                    SuggestionCard(suggestion: s)
+                if state.suggestions.isEmpty {
+                    EmptyState(message: "All suggestions dismissed. Toggle above to bring them back.")
+                } else {
+                    ForEach(state.suggestions) { s in
+                        SuggestionCard(suggestion: s)
+                    }
                 }
             }
             .padding(.horizontal, 14)
             .padding(.top, 12)
         }
+    }
+
+    private var topBar: some View {
+        let dismissedCount = state.suggestions.filter { $0.dismissed }.count
+        return HStack(spacing: 12) {
+            Toggle(isOn: Binding(
+                get: { state.showDismissedSuggestions },
+                set: { newValue in
+                    state.showDismissedSuggestions = newValue
+                    state.reloadSuggestions()
+                })
+            ) {
+                Text("Show dismissed")
+                    .font(Type.body).foregroundColor(Theme.ink2)
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            if state.showDismissedSuggestions && dismissedCount > 0 {
+                Button {
+                    state.undismissAllSuggestions()
+                } label: {
+                    Text("RESTORE ALL")
+                        .font(Type.micro).tracking(1.0)
+                        .foregroundColor(Theme.cyan)
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 4)
     }
 }
 
@@ -95,13 +130,35 @@ struct SuggestionCard: View {
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
                 createButton
+                dismissButton
                 Spacer()
                 kindBadge
             }
         }
         .padding(12)
         .background(hover ? Theme.hover : Theme.surface)
+        .opacity(suggestion.dismissed ? 0.45 : 1.0)
         .onHover { hover = $0 }
+    }
+
+    private var dismissButton: some View {
+        Button {
+            if suggestion.dismissed {
+                state.undismissSuggestion(suggestion)
+            } else {
+                state.dismissSuggestion(suggestion)
+            }
+        } label: {
+            Text(suggestion.dismissed ? "RESTORE" : "DISMISS")
+                .font(.system(size: 10, weight: .semibold))
+                .tracking(1.0)
+                .foregroundColor(Theme.ink3)
+                .padding(.horizontal, 8).padding(.vertical, 5)
+        }
+        .buttonStyle(.plain)
+        .help(suggestion.dismissed
+              ? "Bring this suggestion back into the list"
+              : "Hide this suggestion from future runs")
     }
 
     private var createButton: some View {

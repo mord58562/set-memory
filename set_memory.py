@@ -94,6 +94,23 @@ def main() -> int:
     sg.add_argument("--limit-per-kind", type=int, default=5)
     sg.add_argument("--id", type=str, default=None,
                     help="If set, print only the suggestion with this id.")
+    sg.add_argument("--include-dismissed", action="store_true",
+                    help="Also include suggestions previously hidden.")
+
+    dm = sub.add_parser(
+        "dismiss-suggestion",
+        help="Hide a suggestion from future runs of `suggestions`.",
+    )
+    dm.add_argument("suggestion_id", help="Suggestion id to hide.")
+
+    un = sub.add_parser(
+        "undismiss-suggestion",
+        help="Restore a previously-hidden suggestion. Use --all to restore everything.",
+    )
+    un.add_argument("suggestion_id", nargs="?", default=None,
+                    help="Specific suggestion id, or omit and use --all.")
+    un.add_argument("--all", action="store_true",
+                    help="Restore every dismissed suggestion.")
 
     args = parser.parse_args()
 
@@ -103,6 +120,10 @@ def main() -> int:
         return _run_create_playlist(args)
     if args.cmd == "suggestions":
         return _run_suggestions(args)
+    if args.cmd == "dismiss-suggestion":
+        return _run_dismiss_suggestion(args)
+    if args.cmd == "undismiss-suggestion":
+        return _run_undismiss_suggestion(args)
     if args.on_mount:
         return _run_on_mount(volume_filter=args.volume)
     parser.print_help()
@@ -552,9 +573,14 @@ def _run_suggestions(args: argparse.Namespace) -> int:
     conn = sqlite3.connect(str(state_db_path))
     conn.row_factory = sqlite3.Row
     try:
+        playlist_suggester  # ensure imported above; satisfies linters
+        import ingest
+        ingest.ensure_schema(conn)
         suggestions = playlist_suggester.generate_all(
             conn, limit_per_kind=args.limit_per_kind,
+            include_dismissed=getattr(args, "include_dismissed", False),
         )
+        dismissed = playlist_suggester.dismissed_ids(conn)
     finally:
         conn.close()
 
@@ -570,10 +596,61 @@ def _run_suggestions(args: argparse.Namespace) -> int:
             "id": s.id, "name": s.name, "kind": s.kind,
             "description": s.description, "content_ids": s.content_ids,
             "rationale": s.rationale, "score": s.score,
+            "dismissed": s.id in dismissed,
         }
         for s in suggestions
     ]
     print(json.dumps(payload))
+    return 0
+
+
+def _run_dismiss_suggestion(args: argparse.Namespace) -> int:
+    import json
+    import config as cfg_module
+    import ingest
+    import playlist_suggester
+    try:
+        conf = cfg_module.load()
+    except cfg_module.ConfigError as exc:
+        print(json.dumps({"error": f"Config error: {exc}"})); return 1
+    state_db_path = conf.resolved_state_db()
+    if not state_db_path.exists():
+        print(json.dumps({"error": f"No state.db at {state_db_path}."})); return 1
+    conn = sqlite3.connect(str(state_db_path))
+    try:
+        ingest.ensure_schema(conn)
+        playlist_suggester.dismiss(conn, args.suggestion_id)
+    finally:
+        conn.close()
+    print(json.dumps({"dismissed": args.suggestion_id}))
+    return 0
+
+
+def _run_undismiss_suggestion(args: argparse.Namespace) -> int:
+    import json
+    import config as cfg_module
+    import ingest
+    import playlist_suggester
+    try:
+        conf = cfg_module.load()
+    except cfg_module.ConfigError as exc:
+        print(json.dumps({"error": f"Config error: {exc}"})); return 1
+    state_db_path = conf.resolved_state_db()
+    if not state_db_path.exists():
+        print(json.dumps({"error": f"No state.db at {state_db_path}."})); return 1
+    if not args.all and not args.suggestion_id:
+        print(json.dumps({"error": "Provide a suggestion_id or --all."})); return 2
+    conn = sqlite3.connect(str(state_db_path))
+    try:
+        ingest.ensure_schema(conn)
+        if args.all:
+            n = playlist_suggester.clear_dismissed(conn)
+            print(json.dumps({"undismissed_all": n}))
+        else:
+            playlist_suggester.undismiss(conn, args.suggestion_id)
+            print(json.dumps({"undismissed": args.suggestion_id}))
+    finally:
+        conn.close()
     return 0
 
 

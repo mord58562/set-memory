@@ -143,4 +143,5 @@ struct PlaylistSuggestion: Identifiable, Hashable {
     let contentIDs: [String]
     let rationale: String
     let score: Double
+    let dismissed: Bool
 }

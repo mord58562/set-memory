@@ -389,6 +389,11 @@ _BASE_SCHEMA = """
         last_sync_at     TEXT,
         library_size     INTEGER NOT NULL DEFAULT 0
     );
+
+    CREATE TABLE IF NOT EXISTS dismissed_suggestions (
+        suggestion_id  TEXT PRIMARY KEY,
+        dismissed_at   TEXT NOT NULL
+    );
 """
 
 _V2_COLUMNS = [

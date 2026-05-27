@@ -27,6 +27,7 @@ final class AppState: ObservableObject {
     @Published var suggestions: [PlaylistSuggestion] = []
     @Published var creatingPlaylistID: String? = nil
     @Published var lastPlaylistResult: String? = nil
+    @Published var showDismissedSuggestions: Bool = false
     @Published var mountedRekordboxUsbs: [String] = []
     /// nil = sync every mounted USB. Otherwise restrict to the named volume.
     @Published var syncVolumeFilter: String? = nil
@@ -249,10 +250,13 @@ final class AppState: ObservableObject {
     func reloadSuggestions() {
         let py = pythonPath
         let script = scriptPath
+        let includeDismissed = showDismissedSuggestions
         Task.detached(priority: .utility) { [weak self] in
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: py)
-            proc.arguments = [script, "suggestions"]
+            var args = [script, "suggestions"]
+            if includeDismissed { args.append("--include-dismissed") }
+            proc.arguments = args
             let out = Pipe()
             proc.standardOutput = out
             proc.standardError = Pipe()  // discard
@@ -275,6 +279,7 @@ final class AppState: ObservableObject {
                         contentIDs: ids,
                         rationale: (dict["rationale"] as? String) ?? "",
                         score: (dict["score"] as? Double) ?? 0,
+                        dismissed: (dict["dismissed"] as? Bool) ?? false,
                     )
                 }
                 await MainActor.run { [weak self] in
@@ -283,6 +288,33 @@ final class AppState: ObservableObject {
             } catch {
                 // suggestions are best-effort; don't surface errors
             }
+        }
+    }
+
+    func dismissSuggestion(_ suggestion: PlaylistSuggestion) {
+        runSuggestionsCommand(["dismiss-suggestion", suggestion.id])
+    }
+
+    func undismissSuggestion(_ suggestion: PlaylistSuggestion) {
+        runSuggestionsCommand(["undismiss-suggestion", suggestion.id])
+    }
+
+    func undismissAllSuggestions() {
+        runSuggestionsCommand(["undismiss-suggestion", "--all"])
+    }
+
+    private func runSuggestionsCommand(_ extraArgs: [String]) {
+        let py = pythonPath
+        let script = scriptPath
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: py)
+            proc.arguments = [script] + extraArgs
+            proc.standardOutput = Pipe()
+            proc.standardError = Pipe()
+            try? proc.run()
+            proc.waitUntilExit()
+            await MainActor.run { [weak self] in self?.reloadSuggestions() }
         }
     }
 
