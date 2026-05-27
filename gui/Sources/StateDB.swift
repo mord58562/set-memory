@@ -47,7 +47,7 @@ final class StateDB {
         let sql = """
             SELECT t.content_id, t.title, t.artist, t.bpm, t.key_camelot,
                    t.total_appearances, s.session_date, t.added_at, t.date_created,
-                   t.hot_cue_count, t.memory_cue_count, t.in_library
+                   t.hot_cue_count, t.memory_cue_count, t.in_library, t.file_path
             FROM tracks t
             JOIN sessions s ON s.session_id = t.last_seen_session
             WHERE t.total_appearances >= ?
@@ -63,7 +63,7 @@ final class StateDB {
         let sql = """
             SELECT t.content_id, t.title, t.artist, t.bpm, t.key_camelot,
                    t.total_appearances, NULL AS last_session_date,
-                   t.added_at, t.date_created, t.hot_cue_count, t.memory_cue_count, t.in_library
+                   t.added_at, t.date_created, t.hot_cue_count, t.memory_cue_count, t.in_library, t.file_path
             FROM tracks t
             WHERE t.total_appearances = 0
               AND t.in_library = 1
@@ -80,7 +80,7 @@ final class StateDB {
         let sql = """
             SELECT t.content_id, t.title, t.artist, t.bpm, t.key_camelot,
                    t.total_appearances, NULL AS last_session_date,
-                   t.added_at, t.date_created, t.hot_cue_count, t.memory_cue_count, t.in_library
+                   t.added_at, t.date_created, t.hot_cue_count, t.memory_cue_count, t.in_library, t.file_path
             FROM tracks t
             WHERE t.total_appearances = 0
               AND t.in_library = 1
@@ -96,7 +96,7 @@ final class StateDB {
         let sql = """
             SELECT t.content_id, t.title, t.artist, t.bpm, t.key_camelot,
                    t.total_appearances, NULL AS last_session_date,
-                   t.added_at, t.date_created, t.hot_cue_count, t.memory_cue_count, t.in_library
+                   t.added_at, t.date_created, t.hot_cue_count, t.memory_cue_count, t.in_library, t.file_path
             FROM tracks t
             WHERE t.in_library = 1
               AND (t.bpm IS NULL OR t.key_camelot IS NULL OR t.hot_cue_count = 0)
@@ -182,7 +182,7 @@ final class StateDB {
         let sql = """
             SELECT content_id, title, artist, bpm, key_camelot,
                    total_appearances, NULL AS last_session_date,
-                   added_at, date_created, hot_cue_count, memory_cue_count, in_library
+                   added_at, date_created, hot_cue_count, memory_cue_count, in_library, file_path
             FROM tracks
             WHERE title LIKE ? OR artist LIKE ?
             ORDER BY total_appearances DESC, title ASC
@@ -216,7 +216,7 @@ final class StateDB {
         let sql = """
             SELECT t.content_id, t.title, t.artist, t.bpm, t.key_camelot,
                    t.total_appearances, NULL AS last_session_date,
-                   t.added_at, t.date_created, t.hot_cue_count, t.memory_cue_count, t.in_library
+                   t.added_at, t.date_created, t.hot_cue_count, t.memory_cue_count, t.in_library, t.file_path
             FROM appearances a
             JOIN tracks t ON t.content_id = a.content_id
             WHERE a.session_id = ?
@@ -331,7 +331,8 @@ final class StateDB {
                 dateCreated: text(stmt, 8),
                 hotCueCount: intOrNil(stmt, 9),
                 memoryCueCount: intOrNil(stmt, 10),
-                inLibrary: int(stmt, 11) != 0
+                inLibrary: int(stmt, 11) != 0,
+                filePath: text(stmt, 12)
             ))
         }
         return result

@@ -54,10 +54,45 @@ final class AppState: ObservableObject {
         startFileWatcher()
         detectMountedRekordbox()
         observeSearch()
+        startVolumeMonitoring()
     }
 
     deinit {
         fileWatcher?.cancel()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    // MARK: - Live volume mount/unmount monitoring
+
+    /// Subscribe to NSWorkspace mount/unmount notifications so the app
+    /// reflects USB plug-in / pull-out without the user pressing Rescan.
+    /// On a CDJ-export USB being mounted, also kick off an auto-sync.
+    private func startVolumeMonitoring() {
+        let nc = NSWorkspace.shared.notificationCenter
+        nc.addObserver(forName: NSWorkspace.didMountNotification,
+                       object: nil, queue: .main) { [weak self] note in
+            guard let self else { return }
+            self.detectMountedRekordbox()
+            // If the newly-mounted volume is a CDJ-export USB and we're
+            // not already syncing, fire ingest. Slight delay lets the
+            // filesystem settle (rekordbox writes a couple of files
+            // immediately after mount).
+            let url = (note.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL)
+            let label = url?.lastPathComponent
+            if let label, self.mountedRekordboxUsbs.contains(label), !self.syncing {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                    guard let self, !self.syncing else { return }
+                    let saved = self.syncVolumeFilter
+                    self.syncVolumeFilter = label
+                    self.runSync()
+                    self.syncVolumeFilter = saved
+                }
+            }
+        }
+        nc.addObserver(forName: NSWorkspace.didUnmountNotification,
+                       object: nil, queue: .main) { [weak self] _ in
+            self?.detectMountedRekordbox()
+        }
     }
 
     // MARK: - Reload
@@ -197,6 +232,45 @@ final class AppState: ObservableObject {
         src.setCancelHandler { close(fd) }
         src.resume()
         fileWatcher = src
+    }
+
+    // MARK: - Track file actions
+
+    /// Resolve a track's stored file_path to an absolute reachable URL.
+    /// - Pioneer-relative paths ("/Contents/..." from .pdb) are tried
+    ///   against every currently-mounted rekordbox USB until one finds
+    ///   the file on disk.
+    /// - Absolute paths (master.db FolderPath+FileNameL) are used directly.
+    /// Returns nil if the file isn't currently reachable.
+    func resolveFile(for track: Track) -> URL? {
+        guard let raw = track.filePath, !raw.isEmpty else { return nil }
+        let fm = FileManager.default
+        if raw.hasPrefix("/Volumes/") || raw.hasPrefix("/Users/") {
+            let url = URL(fileURLWithPath: raw)
+            return fm.fileExists(atPath: url.path) ? url : nil
+        }
+        // Pioneer-relative: walk mounted USBs.
+        for label in mountedRekordboxUsbs {
+            let candidate = URL(fileURLWithPath: "/Volumes/\(label)\(raw)")
+            if fm.fileExists(atPath: candidate.path) { return candidate }
+        }
+        return nil
+    }
+
+    func playTrack(_ track: Track) {
+        guard let url = resolveFile(for: track) else {
+            lastError = "Track file not reachable. Plug the USB it lives on, or sync rekordbox to populate the absolute path."
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    func revealTrackInFinder(_ track: Track) {
+        guard let url = resolveFile(for: track) else {
+            lastError = "Track file not reachable. Plug the USB it lives on, or sync rekordbox to populate the absolute path."
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     // MARK: - Mounted-USB detection

@@ -13,6 +13,7 @@ struct Track: Identifiable, Hashable {
     let hotCueCount: Int?
     let memoryCueCount: Int?
     let inLibrary: Bool
+    let filePath: String?       // Pioneer-relative ("/Contents/...") or absolute
     var id: String { contentID }
 
     var displayTitle: String { title ?? "Unknown" }

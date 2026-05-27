@@ -222,11 +222,14 @@ struct TrackRow: View {
 
     private var copyActions: some View {
         VStack(alignment: .trailing, spacing: 5) {
+            let reachable = state.resolveFile(for: track) != nil
+            copyBtn("Play") { state.playTrack(track) }
+                .opacity(reachable ? 1 : 0.4)
+            copyBtn("Reveal in Finder") { state.revealTrackInFinder(track) }
+                .opacity(reachable ? 1 : 0.4)
             copyBtn("Copy \"Title — Artist\"") {
                 copy("\(track.displayTitle) - \(track.displayArtist)")
             }
-            copyBtn("Copy title") { copy(track.displayTitle) }
-            copyBtn("Copy artist") { copy(track.displayArtist) }
         }
     }
 
@@ -249,12 +252,23 @@ struct TrackRow: View {
 }
 
 struct TrackContextMenu: View {
+    @EnvironmentObject var state: AppState
     let track: Track
     var body: some View {
+        let reachable = state.resolveFile(for: track) != nil
+        Button("Play in default app") { state.playTrack(track) }
+            .disabled(!reachable)
+        Button("Reveal in Finder") { state.revealTrackInFinder(track) }
+            .disabled(!reachable)
+        Divider()
         Button("Copy title") { copy(track.displayTitle) }
         Button("Copy artist") { copy(track.displayArtist) }
         Button("Copy \"Title - Artist\"") {
             copy("\(track.displayTitle) - \(track.displayArtist)")
+        }
+        if !reachable {
+            Divider()
+            Text("File not currently reachable — mount the USB it lives on")
         }
     }
     private func copy(_ s: String) {
