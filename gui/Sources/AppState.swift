@@ -206,9 +206,13 @@ final class AppState: ObservableObject {
         let volumes = (try? fm.contentsOfDirectory(atPath: "/Volumes")) ?? []
         var labels: [String] = []
         for v in volumes {
+            // Two valid CDJ-export USB layouts:
+            //   - desktop-rekordbox export: PIONEER/Master/master.db (SQLCipher)
+            //   - CDJ export mode:          PIONEER/rekordbox/export.pdb (DeviceSQL)
+            // Either qualifies the USB as ingestable.
             let master = "/Volumes/\(v)/PIONEER/Master/master.db"
-            let dir = "/Volumes/\(v)/PIONEER/rekordbox"
-            if fm.fileExists(atPath: master), fm.fileExists(atPath: dir) {
+            let pdb    = "/Volumes/\(v)/PIONEER/rekordbox/export.pdb"
+            if fm.fileExists(atPath: master) || fm.fileExists(atPath: pdb) {
                 labels.append(v)
             }
         }
