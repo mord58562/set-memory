@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -33,7 +34,7 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 _MISSING_CONTENT_ID = "__missing__"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class SchemaError(Exception):
@@ -374,6 +375,23 @@ _V2_COLUMNS = [
     ("tracks", "memory_cue_count", "INTEGER"),
 ]
 
+_V3_COLUMNS = [
+    ("tracks", "dedup_key", "TEXT"),
+]
+
+_V3_TABLES = """
+    CREATE TABLE IF NOT EXISTS track_aliases (
+        alias_content_id      TEXT PRIMARY KEY,
+        canonical_content_id  TEXT NOT NULL,
+        source_db_path        TEXT,
+        recorded_at           TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_track_aliases_canonical
+        ON track_aliases (canonical_content_id);
+    CREATE INDEX IF NOT EXISTS idx_tracks_dedup_key
+        ON tracks (dedup_key) WHERE dedup_key IS NOT NULL;
+"""
+
 
 def _apply_schema(state_conn: sqlite3.Connection) -> None:
     state_conn.executescript(_BASE_SCHEMA)
@@ -381,6 +399,14 @@ def _apply_schema(state_conn: sqlite3.Connection) -> None:
     for table, col, decl in _V2_COLUMNS:
         if not _has_column(state_conn, table, col):
             state_conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    # v3 migration: dedup_key + track_aliases + collapse duplicates
+    for table, col, decl in _V3_COLUMNS:
+        if not _has_column(state_conn, table, col):
+            state_conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    state_conn.executescript(_V3_TABLES)
+    current_version = _scalar_meta(state_conn, "schema_version")
+    if current_version is None or int(current_version) < 3:
+        _migrate_v3_dedup(state_conn)
     state_conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -392,6 +418,260 @@ def ensure_schema(state_conn: sqlite3.Connection) -> None:
     _apply_schema(state_conn)
 
 
+def _scalar_meta(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return None if row is None else str(row[0])
+
+
+# ---------------------------------------------------------------------------
+# Track dedup - "the user thinks of one track even across two USBs"
+# ---------------------------------------------------------------------------
+
+_PAREN_RE = re.compile(r"[\(\[\{][^\)\]\}]*[\)\]\}]")
+_NONWORD_RE = re.compile(r"[^a-z0-9 ]+")
+_WS_RE = re.compile(r"\s+")
+
+
+def dedup_key_for(title: Optional[str], artist: Optional[str]) -> Optional[str]:
+    """
+    Stable key for "is this the same track on a different USB?".
+
+    Normalises both fields: lowercase; strip parenthesised tags
+    (remix names, "Free Download", "Original Mix", etc.); strip
+    non-alphanumeric; collapse whitespace. If either title or artist
+    is missing entirely the key is None (don't dedupe; user can't be
+    sure they're the same).
+
+    Examples:
+      ("Speed It Up - Dr. Bounce Remix", "Club Caviar/Dr. Bounce")
+        -> "speed it up dr bounce remix|club caviardr bounce"
+      ("Speed it up  (DR BOUNCE remix)", "club caviar / dr bounce")
+        -> "speed it up|club caviar dr bounce"          (parens stripped)
+    """
+    if not title or not artist:
+        return None
+    def norm(s: str) -> str:
+        s = s.lower()
+        s = _PAREN_RE.sub(" ", s)
+        s = _NONWORD_RE.sub(" ", s)
+        s = _WS_RE.sub(" ", s).strip()
+        return s
+    t = norm(title)
+    a = norm(artist)
+    if not t or not a:
+        return None
+    return f"{t}|{a}"
+
+
+def _migrate_v3_dedup(state_conn: sqlite3.Connection) -> None:
+    """
+    Collapse cross-USB track duplicates into single canonical rows.
+
+    For each set of tracks sharing a dedup_key:
+      1. Pick canonical = highest total_appearances; ties → smallest
+         first_seen_session; ties → lexicographically smallest content_id.
+      2. Sum total_appearances; min first_seen_session; max last_seen_session;
+         OR in_library flags; max last_in_library_at; earliest added_at;
+         max hot_cue_count + memory_cue_count; preserve canonical's title /
+         artist / BPM / key / energy.
+      3. Repoint appearances.content_id from each non-canonical to canonical.
+      4. Insert track_aliases rows for each non-canonical.
+      5. Delete the non-canonical track rows.
+
+    Idempotent: keys are computed every run; tracks that already converge
+    to a canonical row stay as-is.
+    """
+    # Compute and persist dedup_key for every track row.
+    rows = state_conn.execute(
+        "SELECT content_id, title, artist FROM tracks WHERE dedup_key IS NULL"
+    ).fetchall()
+    for r in rows:
+        key = dedup_key_for(r[1] if isinstance(r[1], str) else None,
+                            r[2] if isinstance(r[2], str) else None)
+        if key is not None:
+            state_conn.execute(
+                "UPDATE tracks SET dedup_key = ? WHERE content_id = ?",
+                (key, r[0]),
+            )
+    state_conn.commit()
+
+    # Find dup groups.
+    groups = state_conn.execute("""
+        SELECT dedup_key, COUNT(*) AS n
+        FROM tracks
+        WHERE dedup_key IS NOT NULL
+        GROUP BY dedup_key
+        HAVING n > 1
+    """).fetchall()
+    if not groups:
+        log.info("v3 dedup: no duplicate tracks to collapse.")
+        return
+
+    canon_remap: dict[str, str] = {}  # alias_id -> canonical_id, for fingerprint rewrite
+    merged = 0
+    for key, _ in groups:
+        members = state_conn.execute("""
+            SELECT content_id, title, artist, bpm, key_camelot, energy,
+                   date_created, stock_date, added_at, in_library,
+                   last_in_library_at, hot_cue_count, memory_cue_count,
+                   first_seen_session, last_seen_session, total_appearances
+            FROM tracks WHERE dedup_key = ?
+            ORDER BY total_appearances DESC, first_seen_session ASC, content_id ASC
+        """, (key,)).fetchall()
+        canon = members[0]
+        others = members[1:]
+        canon_id = canon[0]
+
+        total_app = sum(m[15] for m in members)
+        in_lib = 1 if any(m[9] for m in members) else 0
+        last_in_lib = max((m[10] for m in members if m[10]), default=None)
+        added_at = min((m[8] for m in members if m[8]), default=None)
+        hot = max((m[11] for m in members if m[11] is not None), default=None)
+        mem = max((m[12] for m in members if m[12] is not None), default=None)
+        firsts = [m[13] for m in members if m[13] is not None]
+        first_sess = min(firsts) if firsts else None
+        lasts = [m[14] for m in members if m[14] is not None]
+        last_sess = max(lasts) if lasts else None
+
+        state_conn.execute("""
+            UPDATE tracks SET
+              total_appearances = ?,
+              in_library = ?,
+              last_in_library_at = COALESCE(?, last_in_library_at),
+              added_at = COALESCE(?, added_at),
+              hot_cue_count = ?,
+              memory_cue_count = ?,
+              first_seen_session = ?,
+              last_seen_session = ?
+            WHERE content_id = ?
+        """, (total_app, in_lib, last_in_lib, added_at, hot, mem,
+              first_sess, last_sess, canon_id))
+
+        for other in others:
+            other_id = other[0]
+            state_conn.execute(
+                "UPDATE appearances SET content_id = ? WHERE content_id = ?",
+                (canon_id, other_id),
+            )
+            state_conn.execute(
+                "INSERT OR REPLACE INTO track_aliases "
+                "(alias_content_id, canonical_content_id, source_db_path, recorded_at) "
+                "VALUES (?, ?, NULL, ?)",
+                (other_id, canon_id, datetime.now(timezone.utc).isoformat()),
+            )
+            state_conn.execute(
+                "DELETE FROM tracks WHERE content_id = ?", (other_id,))
+            canon_remap[other_id] = canon_id
+            merged += 1
+
+    state_conn.commit()
+    log.info("v3 dedup: merged %d duplicate track row(s) into %d canonical row(s).",
+             merged, len(groups))
+
+    # Recompute session fingerprints with canonical content_ids so the
+    # same gig recorded onto two USBs collapses into one session. Sessions
+    # whose recomputed fingerprint collides with an existing session get
+    # merged: appearances are repointed and the duplicate session is dropped.
+    _recompute_session_fingerprints(state_conn)
+
+
+def _recompute_session_fingerprints(state_conn: sqlite3.Connection) -> None:
+    """
+    Walk every session, recompute its fingerprint from current (canonical)
+    appearance content_ids. When the new fingerprint collides with another
+    session's, the LATER session's appearances are repointed to the EARLIER
+    session and the later session row is deleted.
+    """
+    sessions = state_conn.execute(
+        "SELECT session_id, fingerprint, session_date "
+        "FROM sessions ORDER BY session_date ASC, session_id ASC"
+    ).fetchall()
+    seen: dict[str, int] = {}  # fingerprint -> session_id we kept
+    collapsed = 0
+    for sess_id, old_fp, _date in sessions:
+        rows = state_conn.execute(
+            "SELECT content_id FROM appearances WHERE session_id = ?", (sess_id,)
+        ).fetchall()
+        cids = [str(r[0]) for r in rows]
+        new_fp = compute_fingerprint(cids) if cids else old_fp
+
+        if new_fp in seen and seen[new_fp] != sess_id:
+            keeper = seen[new_fp]
+            # Repoint the duplicate session's appearances to the keeper.
+            state_conn.execute(
+                "UPDATE appearances SET session_id = ? WHERE session_id = ?",
+                (keeper, sess_id),
+            )
+            state_conn.execute(
+                "DELETE FROM sessions WHERE session_id = ?", (sess_id,),
+            )
+            collapsed += 1
+            continue
+
+        if new_fp != old_fp:
+            state_conn.execute(
+                "UPDATE sessions SET fingerprint = ?, track_count = ? "
+                "WHERE session_id = ?",
+                (new_fp, len(cids), sess_id),
+            )
+        seen[new_fp] = sess_id
+    state_conn.commit()
+    if collapsed:
+        log.info("v3 dedup: collapsed %d duplicate session(s) after fingerprint rewrite.",
+                 collapsed)
+
+
+def canonical_content_id(
+    state_conn: sqlite3.Connection,
+    raw_content_id: str,
+    title: Optional[str] = None,
+    artist: Optional[str] = None,
+) -> str:
+    """
+    Resolve a raw (per-USB) content_id to its canonical content_id.
+
+    Lookup order:
+      1. track_aliases.alias_content_id → canonical_content_id (most common
+         after the first sync recorded an alias).
+      2. tracks.content_id == raw_content_id (already canonical, or unseen).
+      3. dedup_key match on (title, artist) → return that canonical id and
+         record the alias for next time.
+      4. Fall back to raw_content_id (caller will insert a new track row).
+    """
+    row = state_conn.execute(
+        "SELECT canonical_content_id FROM track_aliases WHERE alias_content_id = ?",
+        (raw_content_id,),
+    ).fetchone()
+    if row is not None:
+        return str(row[0])
+
+    exists = state_conn.execute(
+        "SELECT 1 FROM tracks WHERE content_id = ?",
+        (raw_content_id,),
+    ).fetchone()
+    if exists is not None:
+        return raw_content_id
+
+    key = dedup_key_for(title, artist)
+    if key is not None:
+        row = state_conn.execute(
+            "SELECT content_id FROM tracks WHERE dedup_key = ? LIMIT 1",
+            (key,),
+        ).fetchone()
+        if row is not None:
+            canonical = str(row[0])
+            state_conn.execute(
+                "INSERT OR REPLACE INTO track_aliases "
+                "(alias_content_id, canonical_content_id, source_db_path, recorded_at) "
+                "VALUES (?, ?, NULL, ?)",
+                (raw_content_id, canonical,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            return canonical
+
+    return raw_content_id
+
+
 # ---------------------------------------------------------------------------
 # Library + session ingest
 # ---------------------------------------------------------------------------
@@ -401,25 +681,59 @@ def _upsert_library_track(
     track: RawTrack,
     ingested_at: str,
     cue_counts: dict[str, tuple[int, int]],
-) -> bool:
+    source_path: Optional[str] = None,
+) -> tuple[str, bool]:
     """
-    Upsert one djmdContent row into tracks. Returns True if a brand-new row.
+    Upsert one library track. Returns (canonical_content_id, was_new).
 
-    Preserves total_appearances and first/last_seen_session if the track was
-    already present (e.g. ingested earlier from session data). Always refreshes
-    in_library, last_in_library_at, and the latest metadata.
+    Dedup-aware: if the (title, artist) normalised key matches an existing
+    canonical track on another USB, the incoming row is recorded as an
+    alias and the canonical metadata is refreshed (in_library re-flagged,
+    cue counts updated, etc.). No duplicate row is ever inserted for the
+    same logical track across USBs.
     """
     hot, mem = cue_counts.get(track.content_id, (0, 0))
-    # Prefer StockDate (date added to library) over DateCreated (file mtime)
-    # when StockDate is populated. Fall back when not.
     added_at = track.stock_date or track.date_created
-    cur = state_conn.execute(
+    key = dedup_key_for(track.title, track.artist)
+
+    canonical_id = canonical_content_id(
+        state_conn, track.content_id, title=track.title, artist=track.artist,
+    )
+    if canonical_id != track.content_id:
+        # We're an alias for an existing canonical. Just refresh that row's
+        # library-side fields - don't bump total_appearances; this isn't a play.
+        state_conn.execute(
+            "UPDATE tracks SET "
+            "  in_library = 1, "
+            "  last_in_library_at = ?, "
+            "  added_at = COALESCE(added_at, ?), "
+            "  bpm = COALESCE(?, bpm), "
+            "  key_camelot = COALESCE(?, key_camelot), "
+            "  energy = COALESCE(?, energy), "
+            "  hot_cue_count = COALESCE(MAX(COALESCE(hot_cue_count, 0), ?), hot_cue_count), "
+            "  memory_cue_count = COALESCE(MAX(COALESCE(memory_cue_count, 0), ?), memory_cue_count) "
+            "WHERE content_id = ?",
+            (ingested_at, added_at, track.bpm, track.key_camelot, track.energy,
+             hot, mem, canonical_id),
+        )
+        # Make sure the alias row records the source path for future debugging.
+        if source_path is not None:
+            state_conn.execute(
+                "UPDATE track_aliases SET source_db_path = COALESCE(source_db_path, ?) "
+                "WHERE alias_content_id = ?",
+                (source_path, track.content_id),
+            )
+        return canonical_id, False
+
+    # Genuinely new (or already-canonical) track row.
+    state_conn.execute(
         "INSERT INTO tracks "
-        "(content_id, title, artist, bpm, key_camelot, energy, date_created, "
-        " stock_date, in_library, last_in_library_at, added_at, "
+        "(content_id, dedup_key, title, artist, bpm, key_camelot, energy, "
+        " date_created, stock_date, in_library, last_in_library_at, added_at, "
         " hot_cue_count, memory_cue_count, total_appearances) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0) "
         "ON CONFLICT(content_id) DO UPDATE SET "
+        "  dedup_key = COALESCE(excluded.dedup_key, tracks.dedup_key), "
         "  title = excluded.title, "
         "  artist = excluded.artist, "
         "  bpm = COALESCE(excluded.bpm, tracks.bpm), "
@@ -433,39 +747,38 @@ def _upsert_library_track(
         "  hot_cue_count = excluded.hot_cue_count, "
         "  memory_cue_count = excluded.memory_cue_count",
         (
-            track.content_id, track.title, track.artist, track.bpm,
+            track.content_id, key, track.title, track.artist, track.bpm,
             track.key_camelot, track.energy, track.date_created, track.stock_date,
             ingested_at, added_at, hot, mem,
         ),
     )
-    return cur.rowcount == 1 and state_conn.total_changes  # crude "new row" hint
+    return canonical_id, True
 
 
 def sync_library(
     usb_conn: sqlite3.Connection,
     state_conn: sqlite3.Connection,
     ingested_at: str,
+    source_path: Optional[str] = None,
 ) -> tuple[int, int]:
     """
-    Sync the entire djmdContent + djmdCue into state.db tracks.
+    Sync the entire djmdContent + djmdCue into state.db tracks, deduping
+    cross-USB.
 
-    Returns (total_library_size, newly_added_rows). Newly_added = rows whose
-    content_id wasn't in tracks before this call. Tracks dropped from the
-    library aren't deleted; their in_library is left as-is and the deleted-
-    track analysis surfaces them via last_in_library_at staleness.
+    Returns (total_library_size_on_usb, newly_added_canonical_rows).
+    library_added only counts genuinely new canonical tracks - a track
+    already in state.db under a different content_id on another USB
+    doesn't bump the counter.
     """
     library = read_all_content(usb_conn)
     cue_counts = read_cue_counts(usb_conn)
-    existing = {
-        row[0] for row in state_conn.execute(
-            "SELECT content_id FROM tracks WHERE in_library = 1"
-        ).fetchall()
-    }
     new_count = 0
     for track in library.values():
-        if track.content_id not in existing:
+        _, was_new = _upsert_library_track(
+            state_conn, track, ingested_at, cue_counts, source_path=source_path,
+        )
+        if was_new:
             new_count += 1
-        _upsert_library_track(state_conn, track, ingested_at, cue_counts)
     state_conn.commit()
     return len(library), new_count
 
@@ -490,8 +803,13 @@ def ingest_from_connection(
 
     _apply_schema(state_conn)
 
-    library_size, library_added = sync_library(usb_conn, state_conn, ingested_at)
+    library_size, library_added = sync_library(
+        usb_conn, state_conn, ingested_at, source_path=source_path,
+    )
 
+    # Session fingerprints use CANONICAL content_ids (post-dedup), so the
+    # same gig recorded onto two USBs collapses to a single session row
+    # instead of two near-duplicates.
     existing_fingerprints: set[str] = {
         row[0]
         for row in state_conn.execute("SELECT fingerprint FROM sessions").fetchall()
@@ -506,19 +824,21 @@ def ingest_from_connection(
 
     for raw_session in raw_sessions:
         songs = read_song_history(usb_conn, raw_session.history_id)
-        content_ids = [s.content_id for s in songs if s.content_id != _MISSING_CONTENT_ID]
-        fingerprint = compute_fingerprint(content_ids)
+        raw_content_ids = [s.content_id for s in songs if s.content_id != _MISSING_CONTENT_ID]
+        track_meta = read_content(usb_conn, raw_content_ids) if raw_content_ids else {}
+
+        # Canonicalise every content_id BEFORE fingerprinting + writing.
+        canon_ids: list[str] = []
+        for cid in raw_content_ids:
+            meta = track_meta.get(cid)
+            canon_ids.append(canonical_content_id(
+                state_conn, cid,
+                title=meta.title if meta else None,
+                artist=meta.artist if meta else None,
+            ))
+        fingerprint = compute_fingerprint(canon_ids)
 
         if fingerprint in existing_fingerprints:
-            existing_row = state_conn.execute(
-                "SELECT raw_history_id FROM sessions WHERE fingerprint = ?",
-                (fingerprint,),
-            ).fetchone()
-            if existing_row and existing_row[0] != raw_session.history_id:
-                log.debug(
-                    "Session fingerprint %s: raw_history_id changed %s -> %s",
-                    fingerprint, existing_row[0], raw_session.history_id,
-                )
             summary.sessions_skipped += 1
             continue
 
@@ -536,15 +856,14 @@ def ingest_from_connection(
         summary.sessions_new += 1
         summary.new_session_ids.append(session_id)
 
-        track_meta = read_content(usb_conn, content_ids) if content_ids else {}
-
         for song in songs:
-            cid = song.content_id
-            if cid == _MISSING_CONTENT_ID:
+            raw_cid = song.content_id
+            if raw_cid == _MISSING_CONTENT_ID:
                 continue
-            meta = track_meta.get(cid)
+            meta = track_meta.get(raw_cid)
             title = meta.title if meta else None
             artist = meta.artist if meta else None
+            cid = canonical_content_id(state_conn, raw_cid, title=title, artist=artist)
 
             state_conn.execute(
                 "INSERT INTO appearances (session_id, content_id, track_no, title, artist) "
@@ -552,29 +871,26 @@ def ingest_from_connection(
                 (session_id, cid, song.track_no, title, artist),
             )
 
-            # Track may already exist from sync_library; bump counters in place.
             state_conn.execute(
                 "INSERT INTO tracks "
-                "(content_id, title, artist, bpm, key_camelot, energy, date_created, "
+                "(content_id, dedup_key, title, artist, bpm, key_camelot, energy, date_created, "
                 " stock_date, first_seen_session, last_seen_session, total_appearances) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1) "
                 "ON CONFLICT(content_id) DO UPDATE SET "
                 "  last_seen_session = excluded.last_seen_session, "
                 "  first_seen_session = COALESCE(tracks.first_seen_session, excluded.first_seen_session), "
                 "  total_appearances = tracks.total_appearances + 1, "
                 "  title = COALESCE(excluded.title, tracks.title), "
-                "  artist = COALESCE(excluded.artist, tracks.artist)",
+                "  artist = COALESCE(excluded.artist, tracks.artist), "
+                "  dedup_key = COALESCE(tracks.dedup_key, excluded.dedup_key)",
                 (
-                    cid,
-                    meta.title if meta else None,
-                    meta.artist if meta else None,
+                    cid, dedup_key_for(title, artist), title, artist,
                     meta.bpm if meta else None,
                     meta.key_camelot if meta else None,
                     meta.energy if meta else None,
                     meta.date_created if meta else None,
                     meta.stock_date if meta else None,
-                    session_id,
-                    session_id,
+                    session_id, session_id,
                 ),
             )
 
@@ -688,34 +1004,31 @@ def ingest_from_pdb(
 
     source_path = str(pdb_path)
 
-    # ---- library sync ----
-    existing_in_library = {
-        row[0] for row in state_conn.execute(
-            "SELECT content_id FROM tracks WHERE in_library = 1"
-        ).fetchall()
-    }
+    # ---- library sync (dedup-aware) ----
     library_added = 0
     for pt in pdb_tracks.values():
         cid = str(pt.track_id)
-        if cid not in existing_in_library:
-            library_added += 1
         artist = pdb_artists.get(pt.artist_id)
         key_name = pdb_keys.get(pt.key_id)
         raw = RawTrack(
             content_id=cid,
             title=pt.title,
             artist=artist,
-            bpm=pt.bpm,                         # already real BPM from pdb_reader
+            bpm=pt.bpm,
             key_camelot=key_name,
-            energy=None,                        # not in .pdb schema
+            energy=None,
             date_created=pt.date_added,
-            stock_date=None,                    # not in .pdb schema
+            stock_date=None,
         )
-        _upsert_library_track(state_conn, raw, ingested_at, cue_counts={})
+        _, was_new = _upsert_library_track(
+            state_conn, raw, ingested_at, cue_counts={}, source_path=source_path,
+        )
+        if was_new:
+            library_added += 1
     state_conn.commit()
     library_size = len(pdb_tracks)
 
-    # ---- sessions ----
+    # ---- sessions (canonicalised content_ids) ----
     existing_fingerprints: set[str] = {
         row[0]
         for row in state_conn.execute("SELECT fingerprint FROM sessions").fetchall()
@@ -728,15 +1041,20 @@ def ingest_from_pdb(
     )
 
     for sess in pdb_sessions:
-        content_ids = [str(tid) for tid in sess.track_ids]
-        fingerprint = compute_fingerprint(content_ids)
+        canon_ids: list[str] = []
+        for tid in sess.track_ids:
+            pt = pdb_tracks.get(tid)
+            title = pt.title if pt else None
+            artist = pdb_artists.get(pt.artist_id) if pt else None
+            canon_ids.append(canonical_content_id(
+                state_conn, str(tid), title=title, artist=artist,
+            ))
+        fingerprint = compute_fingerprint(canon_ids)
 
         if fingerprint in existing_fingerprints:
             summary.sessions_skipped += 1
             continue
 
-        # .pdb history_playlist_row has no date; fall back to the ingest
-        # timestamp so sessions still sort chronologically by ingest order.
         session_date = ingested_at
 
         cur = state_conn.execute(
@@ -754,10 +1072,10 @@ def ingest_from_pdb(
         summary.new_session_ids.append(session_id)
 
         for track_no, tid in enumerate(sess.track_ids, start=1):
-            cid = str(tid)
             pt = pdb_tracks.get(tid)
             title = pt.title if pt else None
             artist = pdb_artists.get(pt.artist_id) if pt else None
+            cid = canonical_content_id(state_conn, str(tid), title=title, artist=artist)
 
             state_conn.execute(
                 "INSERT INTO appearances (session_id, content_id, track_no, title, artist) "
@@ -766,17 +1084,18 @@ def ingest_from_pdb(
             )
             state_conn.execute(
                 "INSERT INTO tracks "
-                "(content_id, title, artist, bpm, key_camelot, energy, date_created, "
+                "(content_id, dedup_key, title, artist, bpm, key_camelot, energy, date_created, "
                 " stock_date, first_seen_session, last_seen_session, total_appearances) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1) "
                 "ON CONFLICT(content_id) DO UPDATE SET "
                 "  last_seen_session = excluded.last_seen_session, "
                 "  first_seen_session = COALESCE(tracks.first_seen_session, excluded.first_seen_session), "
                 "  total_appearances = tracks.total_appearances + 1, "
                 "  title = COALESCE(excluded.title, tracks.title), "
-                "  artist = COALESCE(excluded.artist, tracks.artist)",
+                "  artist = COALESCE(excluded.artist, tracks.artist), "
+                "  dedup_key = COALESCE(tracks.dedup_key, excluded.dedup_key)",
                 (
-                    cid, title, artist,
+                    cid, dedup_key_for(title, artist), title, artist,
                     pt.bpm if pt else None,
                     pdb_keys.get(pt.key_id) if pt else None,
                     None,
