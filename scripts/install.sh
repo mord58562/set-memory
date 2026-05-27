@@ -45,10 +45,15 @@ fi
 echo "[1/8] Python OK: $("$PYTHON" --version)"
 
 # ---------------------------------------------------------------------------
-# 2. Install sqlcipher via Homebrew
+# 2. Install sqlcipher + (optional) terminal-notifier via Homebrew
 # ---------------------------------------------------------------------------
 echo "[2/8] Installing sqlcipher via Homebrew..."
 brew install sqlcipher
+# terminal-notifier gives the notification a click-through that opens the
+# digest. Skipped silently if Homebrew refuses or the user prefers the
+# osascript fallback (which just posts a notification without a click action).
+brew list terminal-notifier >/dev/null 2>&1 || brew install terminal-notifier 2>/dev/null || \
+    echo "      (terminal-notifier optional install skipped; notifications will still fire via osascript)"
 
 # ---------------------------------------------------------------------------
 # 3. Install pyrekordbox

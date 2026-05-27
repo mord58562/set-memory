@@ -1,16 +1,68 @@
 # Set Memory
 
-Reads your rekordbox session log data from the DJ USB drive and surfaces two things
-on every mount:
+Reads your rekordbox session log data from the DJ USB drive and surfaces, on
+every mount:
 
-1. **Forgotten favourites** - tracks you played often but haven't touched in months.
-2. **Never played after add** - tracks that have been in your library for a while
-   but have never appeared in any recorded session.
+1. **Headline + activity sparkline** - one-line summary of what changed plus
+   a sparkline of sessions-per-month over the last year.
+2. **Forgotten favourites** - tracks you played often but haven't touched
+   in months.
+3. **Never played after add** - tracks that have been in your library for a
+   while but have never appeared in any recorded session. Uses rekordbox's
+   `StockDate` (true library-add date) when populated, falling back to file
+   creation date.
+4. **Recently added, not played yet** - buy-regret signal for the last
+   ~30 days. Different question from #3.
+5. **Prep audit** - library tracks missing BPM, key analysis, or hot cues.
+   Sorted by most-played first so the tracks already in rotation bubble up.
+6. **Played together** - track pairs that appeared in many sessions
+   together. Useful for set planning.
+7. **Distribution** - histogram of plays across BPM buckets and Camelot keys.
+   Quick set-diversity awareness.
+8. **Possibly deleted** - tracks recorded in state.db but no longer in any
+   recently-synced USB library.
+9. **USB drives** - per-USB last-mounted timestamp and library size, so a
+   forgotten drive is obvious.
 
-Results land in `~/Downloads/set-memory/digest.md` and fire a macOS notification.
-All data stays on your machine (no cloud, no uploads).
+Results land in `~/Downloads/set-memory/digest.md` and fire a macOS
+notification (clickable when `terminal-notifier` is installed, which the
+installer adds). All data stays on your machine.
+
+A CLI is available for tweaking thresholds without remounting:
+
+```bash
+~/miniconda3/bin/python ~/Downloads/set-memory/set_memory.py query forgotten
+~/miniconda3/bin/python ~/Downloads/set-memory/set_memory.py query prep
+~/miniconda3/bin/python ~/Downloads/set-memory/set_memory.py query together
+~/miniconda3/bin/python ~/Downloads/set-memory/set_memory.py query search --search "marlon"
+~/miniconda3/bin/python ~/Downloads/set-memory/set_memory.py query sessions --since 2026-01-01
+```
 
 ---
+
+## What's new in 0.2.0
+
+- **Never-played actually works.** The original release had a structural
+  bug: the `tracks` table only got populated from session appearances, so
+  the "never played" query (filtering for zero appearances against that
+  table) was always empty by construction. Set Memory now syncs the full
+  `djmdContent` library on every mount, then layers play counts on top.
+- **Notifications actually fire.** Single-quoted AppleScript strings don't
+  compile; every notification has silently failed since release with
+  `syntax error -2741` (visible only in stderr.log). Fixed; click-through
+  added via `terminal-notifier` when present.
+- **BPM correctly normalised** from rekordbox's `value * 100` integer
+  encoding, with zero treated as "not analysed."
+- **Prep audit** flags library tracks missing BPM, key, or hot cues.
+- **Played-together pairs** from co-appearance across sessions.
+- **Recently-added-unplayed** as a distinct buy-regret signal.
+- **Distribution stats** across BPM buckets and Camelot keys.
+- **Per-USB tracking** in a new `usb_drives` table.
+- **Possibly-deleted tracks** surfaced by staleness.
+- **Sparkline + headline** in the digest.
+- **`query` CLI subcommand** for all of the above without remounting.
+- **Schema migrations** with `schema_version` in `meta`; upgrades a v1
+  state.db in place without data loss.
 
 ## What this is NOT
 

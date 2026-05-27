@@ -56,16 +56,19 @@ def _add_track(
     total_appearances: int = 0,
     first_seen_session: int | None = None,
     last_seen_session: int | None = None,
+    in_library: int = 1,
+    added_at: str | None = None,
 ) -> None:
-    """Insert a track row."""
+    """Insert a track row. Library-aware: in_library defaults to 1 so the
+    never-played analysis (which requires in_library=1) sees the row."""
     conn.execute(
         "INSERT OR REPLACE INTO tracks "
-        "(content_id, title, artist, date_created, "
-        "first_seen_session, last_seen_session, total_appearances) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "(content_id, title, artist, date_created, added_at, in_library, "
+        " first_seen_session, last_seen_session, total_appearances) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            content_id, title, artist, date_created,
-            first_seen_session, last_seen_session, total_appearances,
+            content_id, title, artist, date_created, added_at or date_created,
+            in_library, first_seen_session, last_seen_session, total_appearances,
         ),
     )
     conn.commit()

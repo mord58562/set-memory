@@ -1,16 +1,16 @@
 """
-config.py - loads and validates config.json for Set Memory.
+config.py - load and validate config.json.
 
-Returns a typed Config dataclass. Creates config.json with defaults if absent.
-Raises ConfigError immediately on type mismatch so bad edits are caught early.
+Returns a typed Config dataclass. Creates config.json with defaults on
+first run. Raises ConfigError on type or range mismatch so bad edits are
+caught immediately rather than silently producing empty results.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,43 +21,58 @@ CONFIG_PATH = PROJECT_ROOT / "config.json"
 
 
 class ConfigError(Exception):
-    """Raised when config.json contains an invalid type or unrecognised value."""
+    """config.json contains an invalid type, range, or unrecognised value."""
 
 
-# Drives are discovered, not configured. On every mount, set_memory.py
-# scans /Volumes/*/PIONEER/Master/master.db and ingests anything it
-# finds, so multiple DJ USBs accumulate into the same state.db without
-# the user having to know or paste device UUIDs.
 DEFAULTS: dict[str, Any] = {
-    # Forgotten-favourites thresholds
-    # Q4 note: DESIGN recommends 3 for lower-frequency players; default 5 means
-    # a track needs ~5 session appearances before it qualifies as a "favourite."
-    # If the forgotten list is always empty, lower this to 3 in config.json.
+    # Forgotten favourites
     "forgotten_min_appearances": 5,
     "forgotten_days_since_last": 90,
     "forgotten_limit": 10,
-    # Never-played-after-add thresholds
+    # Never played (old library, never in a session)
     "never_played_min_days_since_add": 30,
     "never_played_limit": 10,
-    # state.db location (relative to project root unless absolute)
+    # Recently added but unplayed (buy-regret signal)
+    "recently_added_window_days": 30,
+    "recently_added_limit": 10,
+    # Prep audit (BPM / key / hot cues missing)
+    "prep_limit": 15,
+    # Co-appearance pairs
+    "co_appearance_min_sessions": 3,
+    "co_appearance_limit": 10,
+    # Deleted-track detection
+    "deleted_stale_days": 60,
+    "deleted_limit": 10,
+    # Sparkline depth
+    "sparkline_months": 12,
+    # State + digest paths
     "state_db_path": "state.db",
-    # digest.md location
     "digest_path": "digest.md",
-    # Optional Jury integration (off by default)
+    # Optional Jury integration
     "append_to_jury_digest": False,
     "jury_digest_path": "~/Documents/cleanup-digest.md",
 }
 
-_TYPE_MAP: dict[str, type] = {
-    "forgotten_min_appearances": int,
-    "forgotten_days_since_last": int,
-    "forgotten_limit": int,
-    "never_played_min_days_since_add": int,
-    "never_played_limit": int,
-    "state_db_path": str,
-    "digest_path": str,
-    "append_to_jury_digest": bool,
-    "jury_digest_path": str,
+
+# (type, optional max). int max guards against typos producing silently-empty lists.
+_FIELD_SPECS: dict[str, tuple[type, int | None]] = {
+    "forgotten_min_appearances": (int, 10_000),
+    "forgotten_days_since_last": (int, 36_500),
+    "forgotten_limit": (int, 10_000),
+    "never_played_min_days_since_add": (int, 36_500),
+    "never_played_limit": (int, 10_000),
+    "recently_added_window_days": (int, 36_500),
+    "recently_added_limit": (int, 10_000),
+    "prep_limit": (int, 10_000),
+    "co_appearance_min_sessions": (int, 10_000),
+    "co_appearance_limit": (int, 10_000),
+    "deleted_stale_days": (int, 36_500),
+    "deleted_limit": (int, 10_000),
+    "sparkline_months": (int, 120),
+    "state_db_path": (str, None),
+    "digest_path": (str, None),
+    "append_to_jury_digest": (bool, None),
+    "jury_digest_path": (str, None),
 }
 
 
@@ -68,34 +83,34 @@ class Config:
     forgotten_limit: int = 10
     never_played_min_days_since_add: int = 30
     never_played_limit: int = 10
+    recently_added_window_days: int = 30
+    recently_added_limit: int = 10
+    prep_limit: int = 15
+    co_appearance_min_sessions: int = 3
+    co_appearance_limit: int = 10
+    deleted_stale_days: int = 60
+    deleted_limit: int = 10
+    sparkline_months: int = 12
     state_db_path: str = "state.db"
     digest_path: str = "digest.md"
     append_to_jury_digest: bool = False
     jury_digest_path: str = "~/Documents/cleanup-digest.md"
 
     def resolved_state_db(self) -> Path:
-        """Return absolute path to state.db, resolving relative paths from project root."""
         p = Path(self.state_db_path)
-        if p.is_absolute():
-            return p
-        return PROJECT_ROOT / p
+        return p if p.is_absolute() else PROJECT_ROOT / p
 
     def resolved_digest(self) -> Path:
-        """Return absolute path to digest.md."""
         p = Path(self.digest_path)
-        if p.is_absolute():
-            return p
-        return PROJECT_ROOT / p
+        return p if p.is_absolute() else PROJECT_ROOT / p
 
 
 def load(config_path: Path = CONFIG_PATH) -> Config:
     """
-    Load config.json, create with defaults if absent, validate types.
+    Load config.json (create with defaults if absent), validate.
 
-    Raises ConfigError on type mismatch. Unrecognised keys are ignored
-    (so an old config.json with usb_uuid / usb_pioneer_path stays
-    loadable after the auto-discovery refactor; the fields are simply
-    no longer read).
+    Raises ConfigError on type / range error. Unknown keys are ignored so
+    older configs stay loadable after schema changes.
     """
     if not config_path.exists():
         log.info("config.json not found at %s - creating with defaults", config_path)
@@ -116,6 +131,14 @@ def load(config_path: Path = CONFIG_PATH) -> Config:
         forgotten_limit=int(merged["forgotten_limit"]),
         never_played_min_days_since_add=int(merged["never_played_min_days_since_add"]),
         never_played_limit=int(merged["never_played_limit"]),
+        recently_added_window_days=int(merged["recently_added_window_days"]),
+        recently_added_limit=int(merged["recently_added_limit"]),
+        prep_limit=int(merged["prep_limit"]),
+        co_appearance_min_sessions=int(merged["co_appearance_min_sessions"]),
+        co_appearance_limit=int(merged["co_appearance_limit"]),
+        deleted_stale_days=int(merged["deleted_stale_days"]),
+        deleted_limit=int(merged["deleted_limit"]),
+        sparkline_months=int(merged["sparkline_months"]),
         state_db_path=str(merged["state_db_path"]),
         digest_path=str(merged["digest_path"]),
         append_to_jury_digest=bool(merged["append_to_jury_digest"]),
@@ -124,7 +147,7 @@ def load(config_path: Path = CONFIG_PATH) -> Config:
 
 
 def _validate(data: dict[str, Any]) -> None:
-    for key, expected_type in _TYPE_MAP.items():
+    for key, (expected_type, max_value) in _FIELD_SPECS.items():
         if key not in data:
             continue
         val = data[key]
@@ -138,10 +161,13 @@ def _validate(data: dict[str, Any]) -> None:
                 f"config.json: '{key}' must be {expected_type.__name__}, "
                 f"got {type(val).__name__} ({val!r})"
             )
-        if expected_type is int and val < 0:
-            raise ConfigError(
-                f"config.json: '{key}' must be >= 0, got {val!r}"
-            )
+        if expected_type is int:
+            if val < 0:
+                raise ConfigError(f"config.json: '{key}' must be >= 0, got {val!r}")
+            if max_value is not None and val > max_value:
+                raise ConfigError(
+                    f"config.json: '{key}' must be <= {max_value}, got {val!r}"
+                )
 
 
 def _write_defaults(config_path: Path) -> None:

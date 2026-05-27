@@ -1,15 +1,26 @@
 """
 conftest.py - Shared fixtures for Set Memory tests.
 
-All fixtures use plain sqlite3 (no SQLCipher, no pyrekordbox dependency).
-The synthetic_master_db fixture mirrors the djmd* schema from the real USB db.
+Plain sqlite3 throughout. No SQLCipher, no pyrekordbox dependency. The
+synthetic_master_db fixture mirrors the djmd* schema used by rekordbox 6.x
+(normalised artist + key tables, optional djmdCue table for prep audit).
 
-Fixture inventory:
-  synthetic_usb_db    - path to fixtures/synthetic_master.db (built once per session)
-  synthetic_usb_conn  - open sqlite3 connection to the synthetic db (read-only copy per test)
-  state_db            - in-memory state.db with schema applied, fresh per test function
+Fixtures:
+  synthetic_usb_db    - path to fixtures/synthetic_master.db (session-scoped)
+  synthetic_usb_conn  - open sqlite3 connection to the synthetic db
+  state_db            - in-memory state.db with schema applied, fresh per test
   default_config      - Config dataclass with known thresholds
-  frozen_today        - patches datetime.date.today() to 2026-05-12 for deterministic recency tests
+  frozen_today        - patches datetime.date.today() to 2026-05-12
+
+Data layout (FROZEN_TODAY = 2026-05-12):
+  5 sessions, 20 tracks in djmdContent
+  C001..C004 in all 5 sessions
+  C005..C008 in sessions 1-3 only
+  C009/C010 in sessions 4-5 only
+  C011..C015 in djmdContent only, added 2026-01-01 (old, unplayed)
+  C016..C020 in djmdContent only, added 2026-04-20 (recent, unplayed)
+  djmdCue: C001..C005 have 3 hot cues each; C006..C010 have memory cues only;
+    C011..C020 have no cue rows (prep-audit candidates)
 """
 
 from __future__ import annotations
@@ -23,7 +34,6 @@ from unittest.mock import patch
 
 import pytest
 
-# Make the project root importable from tests/
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -33,43 +43,10 @@ from config import Config
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 SYNTHETIC_DB_PATH = FIXTURES_DIR / "synthetic_master.db"
 
-# ---------------------------------------------------------------------------
-# Frozen date used across all recency-sensitive tests
-# ---------------------------------------------------------------------------
 FROZEN_TODAY = datetime.date(2026, 5, 12)
 
 
-# ---------------------------------------------------------------------------
-# Synthetic USB db construction
-# ---------------------------------------------------------------------------
-
 def _build_synthetic_db(path: Path) -> None:
-    """
-    Build a plain SQLite file at `path` mirroring the djmd* schema.
-
-    Data layout:
-      5 sessions (djmdHistory rows)
-      Sessions 1-3: 4 tracks each (djmdSongHistory rows)
-      Sessions 4-5: 2 tracks each
-      Total djmdContent rows: 20 (IDs 'C001'..'C020')
-
-    Overlap design (for forgotten / never-played testing):
-      C001..C004: appear in all 5 sessions -> total_appearances = 5
-      C005..C008: appear in sessions 1-3 -> total_appearances = 3
-      C009..C010: appear in sessions 4-5 -> total_appearances = 2
-      C011..C020: in djmdContent but never in any session -> never-played candidates
-
-    Session dates (for recency testing with FROZEN_TODAY = 2026-05-12):
-      Session 1: 2025-09-01  (>= 90 days before frozen today = 2026-02-11; well before)
-      Session 2: 2025-10-01
-      Session 3: 2025-11-01
-      Session 4: 2026-04-01  (41 days before frozen today; recent)
-      Session 5: 2026-05-01  (11 days before frozen today; very recent)
-
-    djmdContent date_created for never-played tracks:
-      C011..C015: 2026-01-01  (> 30 days before frozen today; qualify for never-played)
-      C016..C020: 2026-04-20  (22 days before frozen today; too recent, < 30 days)
-    """
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         path.unlink()
@@ -77,59 +54,34 @@ def _build_synthetic_db(path: Path) -> None:
     conn = sqlite3.connect(str(path))
     cur = conn.cursor()
 
-    # Schema mirrors the real rekordbox 6.x layout: artist and key are
-    # normalised into their own tables, joined to djmdContent via
-    # ArtistID / KeyID. The earlier fixture inlined those fields as flat
-    # columns on djmdContent, which let queries like "SELECT ArtistName
-    # FROM djmdContent" pass tests but blow up against a real USB.
     cur.executescript("""
         CREATE TABLE djmdHistory (
-            ID          TEXT PRIMARY KEY,
-            Seq         INTEGER,
-            Name        TEXT,
-            Attribute   INTEGER,
-            ParentID    TEXT,
-            DateCreated TEXT
+            ID TEXT PRIMARY KEY, Seq INTEGER, Name TEXT, Attribute INTEGER,
+            ParentID TEXT, DateCreated TEXT
         );
-
         CREATE TABLE djmdSongHistory (
-            ID          TEXT PRIMARY KEY,
-            HistoryID   TEXT NOT NULL,
-            ContentID   TEXT,
-            TrackNo     INTEGER
+            ID TEXT PRIMARY KEY, HistoryID TEXT NOT NULL,
+            ContentID TEXT, TrackNo INTEGER
         );
-
-        CREATE TABLE djmdArtist (
-            ID          TEXT PRIMARY KEY,
-            Name        TEXT
-        );
-
-        CREATE TABLE djmdKey (
-            ID          TEXT PRIMARY KEY,
-            ScaleName   TEXT
-        );
-
+        CREATE TABLE djmdArtist (ID TEXT PRIMARY KEY, Name TEXT);
+        CREATE TABLE djmdKey (ID TEXT PRIMARY KEY, ScaleName TEXT);
         CREATE TABLE djmdContent (
-            ID          TEXT PRIMARY KEY,
-            Title       TEXT,
-            ArtistID    TEXT,
-            KeyID       TEXT,
-            BPM         REAL,
-            ColorID     INTEGER,
-            DateCreated TEXT
+            ID TEXT PRIMARY KEY, Title TEXT, ArtistID TEXT, KeyID TEXT,
+            BPM REAL, ColorID INTEGER, DateCreated TEXT, StockDate TEXT
+        );
+        CREATE TABLE djmdCue (
+            ID TEXT PRIMARY KEY, ContentID TEXT, Kind INTEGER, InMsec INTEGER
         );
     """)
 
-    # Seed five artists and one key so the JOINs in read_content have
-    # something to bind against; the real DB has many more but this is
-    # enough for deterministic test data.
     cur.executemany(
         "INSERT INTO djmdArtist (ID, Name) VALUES (?, ?)",
         [(f"A{n}", f"Artist {n}") for n in range(1, 6)],
     )
-    cur.execute("INSERT INTO djmdKey (ID, ScaleName) VALUES ('K001', '5A')")
+    # Keys cover several Camelot wheel positions so distribution stats are nontrivial.
+    keys = [("K001", "5A"), ("K002", "5B"), ("K003", "8A"), ("K004", "8B"), ("K005", "11A")]
+    cur.executemany("INSERT INTO djmdKey (ID, ScaleName) VALUES (?, ?)", keys)
 
-    # Sessions
     sessions = [
         ("H001", 1, "2025.09.01", "2025-09-01"),
         ("H002", 2, "2025.10.01", "2025-10-01"),
@@ -143,31 +95,51 @@ def _build_synthetic_db(path: Path) -> None:
         sessions,
     )
 
-    # djmdContent rows (20 tracks). Artist is referenced by FK to
-    # djmdArtist; key is FK to djmdKey.
     content_rows = []
     for i in range(1, 21):
         cid = f"C{i:03d}"
         title = f"Track {i}"
         artist_id = f"A{(i % 5) + 1}"
-        key_id = "K001"
+        key_id = f"K{(i % 5) + 1:03d}"
         bpm = 125.0 + i * 0.5
+        # Sprinkle in tracks with NULL BPM/key so prep audit has work to do.
+        if i in (7, 13):
+            bpm = None
+        if i in (8, 14):
+            key_id = None
         energy = (i % 10) + 1
-        # Never-played tracks: C011-C015 old enough, C016-C020 too recent
         if i <= 10:
             date_created = f"2025-0{max(1, i % 9 + 1):02d}-01"
+            stock_date = date_created
         elif i <= 15:
-            date_created = "2026-01-01"
+            date_created = "2024-12-01"  # file older than library-add
+            stock_date = "2026-01-01"    # actual library-add date
         else:
-            date_created = "2026-04-20"
-        content_rows.append((cid, title, artist_id, key_id, bpm, energy, date_created))
+            date_created = "2024-12-01"
+            stock_date = "2026-04-20"
+        content_rows.append((cid, title, artist_id, key_id, bpm, energy, date_created, stock_date))
     cur.executemany(
-        "INSERT INTO djmdContent (ID, Title, ArtistID, KeyID, BPM, ColorID, DateCreated) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO djmdContent (ID, Title, ArtistID, KeyID, BPM, ColorID, DateCreated, StockDate) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         content_rows,
     )
 
-    # djmdSongHistory rows
+    # djmdCue: hot cues for C001..C005 (Kind=1), memory cues for C006..C010 (Kind=0).
+    cue_rows = []
+    cue_id = 1
+    for cid_num in range(1, 6):
+        for _ in range(3):
+            cue_rows.append((f"CU{cue_id:04d}", f"C{cid_num:03d}", 1, 0))
+            cue_id += 1
+    for cid_num in range(6, 11):
+        for _ in range(2):
+            cue_rows.append((f"CU{cue_id:04d}", f"C{cid_num:03d}", 0, 0))
+            cue_id += 1
+    cur.executemany(
+        "INSERT INTO djmdCue (ID, ContentID, Kind, InMsec) VALUES (?, ?, ?, ?)",
+        cue_rows,
+    )
+
     sh_rows = []
     sh_id = 1
 
@@ -176,15 +148,12 @@ def _build_synthetic_db(path: Path) -> None:
         sh_rows.append((f"SH{sh_id:04d}", history_id, content_id, track_no))
         sh_id += 1
 
-    # Sessions 1-3: C001-C004 + session-specific tracks
     for sess_idx, hid in enumerate(["H001", "H002", "H003"]):
         for track_no, cid in enumerate(["C001", "C002", "C003", "C004"], start=1):
             add_song(hid, cid, track_no)
-        # Session-specific track (C005-C008, one per session for sessions 1-3)
         extra_cid = f"C{5 + sess_idx:03d}"
         add_song(hid, extra_cid, 5)
 
-    # Sessions 4-5: C001-C004 + C009/C010
     for sess_idx, hid in enumerate(["H004", "H005"]):
         for track_no, cid in enumerate(["C001", "C002"], start=1):
             add_song(hid, cid, track_no)
@@ -200,30 +169,14 @@ def _build_synthetic_db(path: Path) -> None:
     conn.close()
 
 
-# ---------------------------------------------------------------------------
-# Pytest fixtures
-# ---------------------------------------------------------------------------
-
 @pytest.fixture(scope="session")
 def synthetic_usb_db() -> Path:
-    """
-    Build (or reuse) the synthetic USB db at fixtures/synthetic_master.db.
-
-    Rebuilds if the file does not exist. Use scope="session" because the db
-    content is read-only - no fixture mutates it.
-    """
     _build_synthetic_db(SYNTHETIC_DB_PATH)
     return SYNTHETIC_DB_PATH
 
 
 @pytest.fixture
 def synthetic_usb_conn(synthetic_usb_db: Path) -> Generator[sqlite3.Connection, None, None]:
-    """
-    Open a plain sqlite3 connection to the synthetic USB db.
-
-    Each test gets its own connection (opened in read-only mode via URI).
-    Closed automatically after the test.
-    """
     uri = f"file:{synthetic_usb_db}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
@@ -233,11 +186,6 @@ def synthetic_usb_conn(synthetic_usb_db: Path) -> Generator[sqlite3.Connection, 
 
 @pytest.fixture
 def state_db() -> Generator[sqlite3.Connection, None, None]:
-    """
-    In-memory state.db with schema applied, fresh for each test function.
-
-    Never shared between tests - each call returns a brand-new in-memory db.
-    """
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     ingest.ensure_schema(conn)
@@ -247,33 +195,19 @@ def state_db() -> Generator[sqlite3.Connection, None, None]:
 
 @pytest.fixture
 def default_config() -> Config:
-    """Config dataclass with known, deterministic thresholds for testing."""
-    return Config(
-        forgotten_min_appearances=5,
-        forgotten_days_since_last=90,
-        forgotten_limit=10,
-        never_played_min_days_since_add=30,
-        never_played_limit=10,
-        state_db_path="state.db",
-        digest_path="digest.md",
-    )
+    return Config()
 
 
 @pytest.fixture
 def frozen_today() -> Generator[datetime.date, None, None]:
-    """
-    Patch datetime.date.today() in analyse and digest modules to return FROZEN_TODAY.
-
-    Yields the frozen date so tests can reference it directly.
-    """
     fixed = FROZEN_TODAY
     with (
         patch("analyse.datetime") as mock_analyse_dt,
         patch("digest.datetime") as mock_digest_dt,
     ):
-        # Preserve other datetime attributes while patching today()
         mock_analyse_dt.date.today.return_value = fixed
         mock_analyse_dt.date.side_effect = lambda *a, **kw: datetime.date(*a, **kw)
+        mock_analyse_dt.date.fromisoformat.side_effect = datetime.date.fromisoformat
         mock_analyse_dt.timedelta = datetime.timedelta
 
         mock_digest_dt.date.today.return_value = fixed
