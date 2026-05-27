@@ -34,7 +34,7 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 _MISSING_CONTENT_ID = "__missing__"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class SchemaError(Exception):
@@ -74,6 +74,7 @@ class RawTrack:
     energy: Optional[int]
     date_created: Optional[str]
     stock_date: Optional[str] = None
+    file_path: Optional[str] = None
 
 
 @dataclass
@@ -210,11 +211,16 @@ def read_all_content(conn: sqlite3.Connection) -> dict[str, RawTrack]:
     date, often years before import). Falls back to DateCreated.
     """
     _require_tables(conn, ["djmdContent"])
-    has_stock = _has_column(conn, "djmdContent", "StockDate")
-    stock_select = "c.StockDate" if has_stock else "NULL AS StockDate"
+    has_stock  = _has_column(conn, "djmdContent", "StockDate")
+    has_folder = _has_column(conn, "djmdContent", "FolderPath")
+    has_file   = _has_column(conn, "djmdContent", "FileNameL")
+    stock_select  = "c.StockDate"  if has_stock  else "NULL AS StockDate"
+    folder_select = "c.FolderPath" if has_folder else "NULL AS FolderPath"
+    file_select   = "c.FileNameL"  if has_file   else "NULL AS FileNameL"
     rows = conn.execute(
         f"SELECT c.ID, c.Title, a.Name AS ArtistName, c.BPM, "
-        f"       k.ScaleName AS Tonality, c.ColorID, c.DateCreated, {stock_select} "
+        f"       k.ScaleName AS Tonality, c.ColorID, c.DateCreated, "
+        f"       {stock_select}, {folder_select}, {file_select} "
         f"FROM djmdContent c "
         f"LEFT JOIN djmdArtist a ON a.ID = c.ArtistID "
         f"LEFT JOIN djmdKey    k ON k.ID = c.KeyID"
@@ -231,8 +237,20 @@ def read_all_content(conn: sqlite3.Connection) -> dict[str, RawTrack]:
             energy=int(row["ColorID"]) if row["ColorID"] is not None else None,
             date_created=str(row["DateCreated"]) if row["DateCreated"] else None,
             stock_date=str(row["StockDate"]) if has_stock and row["StockDate"] else None,
+            file_path=_join_path(row["FolderPath"] if has_folder else None,
+                                 row["FileNameL"] if has_file else None),
         )
     return result
+
+
+def _join_path(folder, name) -> Optional[str]:
+    if not folder and not name:
+        return None
+    f = str(folder).rstrip("/") if folder else ""
+    n = str(name) if name else ""
+    if not n:
+        return f or None
+    return f"{f}/{n}" if f else n
 
 
 def read_content(conn: sqlite3.Connection, content_ids: list[str]) -> dict[str, RawTrack]:
@@ -240,12 +258,17 @@ def read_content(conn: sqlite3.Connection, content_ids: list[str]) -> dict[str, 
     if not content_ids:
         return {}
     _require_tables(conn, ["djmdContent"])
-    has_stock = _has_column(conn, "djmdContent", "StockDate")
-    stock_select = "c.StockDate" if has_stock else "NULL AS StockDate"
+    has_stock  = _has_column(conn, "djmdContent", "StockDate")
+    has_folder = _has_column(conn, "djmdContent", "FolderPath")
+    has_file   = _has_column(conn, "djmdContent", "FileNameL")
+    stock_select  = "c.StockDate"  if has_stock  else "NULL AS StockDate"
+    folder_select = "c.FolderPath" if has_folder else "NULL AS FolderPath"
+    file_select   = "c.FileNameL"  if has_file   else "NULL AS FileNameL"
     placeholders = ",".join("?" * len(content_ids))
     rows = conn.execute(
         f"SELECT c.ID, c.Title, a.Name AS ArtistName, c.BPM, "
-        f"       k.ScaleName AS Tonality, c.ColorID, c.DateCreated, {stock_select} "
+        f"       k.ScaleName AS Tonality, c.ColorID, c.DateCreated, "
+        f"       {stock_select}, {folder_select}, {file_select} "
         f"FROM djmdContent c "
         f"LEFT JOIN djmdArtist a ON a.ID = c.ArtistID "
         f"LEFT JOIN djmdKey    k ON k.ID = c.KeyID "
@@ -264,6 +287,8 @@ def read_content(conn: sqlite3.Connection, content_ids: list[str]) -> dict[str, 
             energy=int(row["ColorID"]) if row["ColorID"] is not None else None,
             date_created=str(row["DateCreated"]) if row["DateCreated"] else None,
             stock_date=str(row["StockDate"]) if has_stock and row["StockDate"] else None,
+            file_path=_join_path(row["FolderPath"] if has_folder else None,
+                                 row["FileNameL"] if has_file else None),
         )
     return result
 
@@ -379,6 +404,15 @@ _V3_COLUMNS = [
     ("tracks", "dedup_key", "TEXT"),
 ]
 
+_V4_COLUMNS = [
+    # Pioneer-format relative file path on the source USB (e.g.
+    # "/CONTENTS/Artist/Track.mp3" for .pdb, or the absolute Mac path
+    # for master.db's c.FolderPath+c.FileNameL). The GUI resolves to an
+    # absolute file via the source_db_path on the alias / canonical
+    # row, then offers Play / Reveal-in-Finder.
+    ("tracks", "file_path", "TEXT"),
+]
+
 _V3_TABLES = """
     CREATE TABLE IF NOT EXISTS track_aliases (
         alias_content_id      TEXT PRIMARY KEY,
@@ -401,6 +435,9 @@ def _apply_schema(state_conn: sqlite3.Connection) -> None:
             state_conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     # v3 migration: dedup_key + track_aliases + collapse duplicates
     for table, col, decl in _V3_COLUMNS:
+        if not _has_column(state_conn, table, col):
+            state_conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    for table, col, decl in _V4_COLUMNS:
         if not _has_column(state_conn, table, col):
             state_conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     state_conn.executescript(_V3_TABLES)
@@ -730,8 +767,8 @@ def _upsert_library_track(
         "INSERT INTO tracks "
         "(content_id, dedup_key, title, artist, bpm, key_camelot, energy, "
         " date_created, stock_date, in_library, last_in_library_at, added_at, "
-        " hot_cue_count, memory_cue_count, total_appearances) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0) "
+        " hot_cue_count, memory_cue_count, file_path, total_appearances) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, 0) "
         "ON CONFLICT(content_id) DO UPDATE SET "
         "  dedup_key = COALESCE(excluded.dedup_key, tracks.dedup_key), "
         "  title = excluded.title, "
@@ -745,11 +782,12 @@ def _upsert_library_track(
         "  last_in_library_at = excluded.last_in_library_at, "
         "  added_at = COALESCE(tracks.added_at, excluded.added_at), "
         "  hot_cue_count = excluded.hot_cue_count, "
-        "  memory_cue_count = excluded.memory_cue_count",
+        "  memory_cue_count = excluded.memory_cue_count, "
+        "  file_path = COALESCE(excluded.file_path, tracks.file_path)",
         (
             track.content_id, key, track.title, track.artist, track.bpm,
             track.key_camelot, track.energy, track.date_created, track.stock_date,
-            ingested_at, added_at, hot, mem,
+            ingested_at, added_at, hot, mem, track.file_path,
         ),
     )
     return canonical_id, True
@@ -1019,6 +1057,7 @@ def ingest_from_pdb(
             energy=None,
             date_created=pt.date_added,
             stock_date=None,
+            file_path=pt.file_path,
         )
         _, was_new = _upsert_library_track(
             state_conn, raw, ingested_at, cue_counts={}, source_path=source_path,

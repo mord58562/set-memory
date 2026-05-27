@@ -135,14 +135,16 @@ struct TopBar: View {
                 .foregroundColor(Theme.ink)
                 .focused($searchFocus)
                 .onSubmit { state.selectedSection = .search }
+                .onExitCommand { searchFocus = false }
             if state.searchTerm.isEmpty {
-                Text("⌘F")
+                Text(searchFocus ? "⎋" : "⌘F")
                     .font(Type.micro)
                     .tracking(0.6)
                     .foregroundColor(Theme.ink3)
             } else {
                 Button {
                     state.searchTerm = ""
+                    searchFocus = false
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 9, weight: .bold))
@@ -159,6 +161,13 @@ struct TopBar: View {
         .onChange(of: state.searchTerm) { newValue in
             if !newValue.isEmpty { state.selectedSection = .search }
         }
+        // Hidden Escape catcher that fires even when the textfield isn't
+        // the first responder - guarantees Escape always defocuses.
+        .background(
+            Button("") { searchFocus = false }
+                .keyboardShortcut(.escape, modifiers: [])
+                .opacity(0)
+        )
     }
 
     private var syncButton: some View {
