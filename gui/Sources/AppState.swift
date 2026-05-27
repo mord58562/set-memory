@@ -24,6 +24,9 @@ final class AppState: ObservableObject {
     @Published var selectedSection: SidebarSection = .forgotten
     @Published var selectedTrack: Track?
     @Published var selectedSession: SessionRecord?
+    @Published var suggestions: [PlaylistSuggestion] = []
+    @Published var creatingPlaylistID: String? = nil
+    @Published var lastPlaylistResult: String? = nil
     @Published var mountedRekordboxUsbs: [String] = []
     /// nil = sync every mounted USB. Otherwise restrict to the named volume.
     @Published var syncVolumeFilter: String? = nil
@@ -145,6 +148,10 @@ final class AppState: ObservableObject {
                 self.lastReloadAt = Date()
                 self.lastError = nil
             }
+            // Suggestions are derived; refresh them whenever the base data
+            // changes. Best-effort; the Python suggester runs in detached
+            // task, doesn't block the UI.
+            await MainActor.run { [weak self] in self?.reloadSuggestions() }
         }
     }
 
@@ -232,6 +239,94 @@ final class AppState: ObservableObject {
         src.setCancelHandler { close(fd) }
         src.resume()
         fileWatcher = src
+    }
+
+    // MARK: - Suggestions + rekordbox playlist write
+
+    /// Run the Python suggester. Results are cached in `suggestions`.
+    /// Called automatically after every reloadAll(); also exposed as
+    /// `Refresh suggestions` in the GUI.
+    func reloadSuggestions() {
+        let py = pythonPath
+        let script = scriptPath
+        Task.detached(priority: .utility) { [weak self] in
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: py)
+            proc.arguments = [script, "suggestions"]
+            let out = Pipe()
+            proc.standardOutput = out
+            proc.standardError = Pipe()  // discard
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                guard let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+                    return
+                }
+                let parsed: [PlaylistSuggestion] = raw.compactMap { dict in
+                    guard let id = dict["id"] as? String,
+                          let name = dict["name"] as? String,
+                          let kind = dict["kind"] as? String,
+                          let description = dict["description"] as? String,
+                          let ids = dict["content_ids"] as? [String]
+                    else { return nil }
+                    return PlaylistSuggestion(
+                        id: id, name: name, kind: kind, description: description,
+                        contentIDs: ids,
+                        rationale: (dict["rationale"] as? String) ?? "",
+                        score: (dict["score"] as? Double) ?? 0,
+                    )
+                }
+                await MainActor.run { [weak self] in
+                    self?.suggestions = parsed
+                }
+            } catch {
+                // suggestions are best-effort; don't surface errors
+            }
+        }
+    }
+
+    /// One-click: hand a suggestion's content_ids to Python's
+    /// rekordbox_writer via the create-playlist CLI. Surfaces the JSON
+    /// result back as `lastPlaylistResult` so the GUI can show a banner.
+    func createPlaylist(from suggestion: PlaylistSuggestion) {
+        guard creatingPlaylistID == nil else { return }
+        creatingPlaylistID = suggestion.id
+        let py = pythonPath
+        let script = scriptPath
+        let name = suggestion.name
+        let sid = suggestion.id
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: py)
+            proc.arguments = [script, "create-playlist", name, "--suggestion", sid]
+            let out = Pipe()
+            proc.standardOutput = out
+            proc.standardError = Pipe()
+            var message = "Created."
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    if let err = json["error"] as? String {
+                        message = "rekordbox: \(err)"
+                    } else if let added = json["tracks_added"] as? Int {
+                        let unmatched = json["unmatched"] as? Int ?? 0
+                        message = "\(name): added \(added) track(s)" +
+                                  (unmatched > 0 ? "; \(unmatched) unmatched" : "")
+                    }
+                } else {
+                    message = "rekordbox returned unexpected output"
+                }
+            } catch {
+                message = "couldn't launch rekordbox writer: \(error.localizedDescription)"
+            }
+            await MainActor.run { [weak self] in
+                self?.creatingPlaylistID = nil
+                self?.lastPlaylistResult = message
+            }
+        }
     }
 
     // MARK: - Track file actions

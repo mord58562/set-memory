@@ -11,7 +11,7 @@ struct Sidebar: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 group("library", title: "LIBRARY",
-                      items: [.forgotten, .recentUnplayed, .neverPlayed, .prep])
+                      items: [.suggestions, .forgotten, .recentUnplayed, .neverPlayed, .prep])
                 group("patterns", title: "PATTERNS",
                       items: [.together, .distribution])
                 group("maintenance", title: "MAINTENANCE",
@@ -84,6 +84,7 @@ struct SidebarRow: View {
 
     private var badge: Int? {
         switch section {
+        case .suggestions:    return state.suggestions.count
         case .forgotten:      return state.forgotten.count
         case .recentUnplayed: return state.recentUnplayed.count
         case .neverPlayed:    return state.neverPlayed.count

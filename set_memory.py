@@ -77,9 +77,23 @@ def main() -> int:
         help="Comma-separated Set Memory canonical content IDs (alternative to --kind).",
     )
     cp.add_argument(
+        "--suggestion",
+        type=str,
+        default=None,
+        help="ID of a playlist suggestion (from `set_memory.py suggestions`).",
+    )
+    cp.add_argument(
         "--limit", type=int, default=None,
         help="Override the configured limit when using --kind.",
     )
+
+    sg = sub.add_parser(
+        "suggestions",
+        help="List auto-generated playlist suggestions (JSON).",
+    )
+    sg.add_argument("--limit-per-kind", type=int, default=5)
+    sg.add_argument("--id", type=str, default=None,
+                    help="If set, print only the suggestion with this id.")
 
     args = parser.parse_args()
 
@@ -87,6 +101,8 @@ def main() -> int:
         return _run_query(args)
     if args.cmd == "create-playlist":
         return _run_create_playlist(args)
+    if args.cmd == "suggestions":
+        return _run_suggestions(args)
     if args.on_mount:
         return _run_on_mount(volume_filter=args.volume)
     parser.print_help()
@@ -435,11 +451,12 @@ def _run_create_playlist(args: argparse.Namespace) -> int:
     import config as cfg_module
     import rekordbox_writer
 
-    if not args.kind and not args.content_ids:
-        print(json.dumps({"error": "Provide --kind or --content-ids."}))
+    sources = [bool(args.kind), bool(args.content_ids), bool(args.suggestion)]
+    if sum(sources) == 0:
+        print(json.dumps({"error": "Provide --kind, --content-ids or --suggestion."}))
         return 2
-    if args.kind and args.content_ids:
-        print(json.dumps({"error": "Use --kind OR --content-ids, not both."}))
+    if sum(sources) > 1:
+        print(json.dumps({"error": "Use only ONE of --kind / --content-ids / --suggestion."}))
         return 2
 
     try:
@@ -456,6 +473,19 @@ def _run_create_playlist(args: argparse.Namespace) -> int:
     warnings: list[str] = []
     if args.content_ids:
         content_ids = [s.strip() for s in args.content_ids.split(",") if s.strip()]
+    elif args.suggestion:
+        import playlist_suggester
+        conn = sqlite3.connect(str(state_db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            suggestions = playlist_suggester.generate_all(conn)
+        finally:
+            conn.close()
+        match = next((s for s in suggestions if s.id == args.suggestion), None)
+        if match is None:
+            print(json.dumps({"error": f"Unknown suggestion id: {args.suggestion}"}))
+            return 1
+        content_ids = list(match.content_ids)
     else:
         try:
             content_ids = _content_ids_for_kind(args.kind, conf, state_db_path,
@@ -498,6 +528,51 @@ def _run_create_playlist(args: argparse.Namespace) -> int:
         "backup_path": result.get("backup_path"),
         "warnings": warnings,
     }
+    print(json.dumps(payload))
+    return 0
+
+
+def _run_suggestions(args: argparse.Namespace) -> int:
+    """Print auto-generated playlist suggestions as JSON to stdout."""
+    import json
+    import config as cfg_module
+    import playlist_suggester
+
+    try:
+        conf = cfg_module.load()
+    except cfg_module.ConfigError as exc:
+        print(json.dumps({"error": f"Config error: {exc}"}))
+        return 1
+
+    state_db_path = conf.resolved_state_db()
+    if not state_db_path.exists():
+        print(json.dumps({"error": f"No state.db at {state_db_path}."}))
+        return 1
+
+    conn = sqlite3.connect(str(state_db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        suggestions = playlist_suggester.generate_all(
+            conn, limit_per_kind=args.limit_per_kind,
+        )
+    finally:
+        conn.close()
+
+    if args.id:
+        match = next((s for s in suggestions if s.id == args.id), None)
+        if match is None:
+            print(json.dumps({"error": f"No suggestion with id={args.id}"}))
+            return 1
+        suggestions = [match]
+
+    payload = [
+        {
+            "id": s.id, "name": s.name, "kind": s.kind,
+            "description": s.description, "content_ids": s.content_ids,
+            "rationale": s.rationale, "score": s.score,
+        }
+        for s in suggestions
+    ]
     print(json.dumps(payload))
     return 0
 

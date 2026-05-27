@@ -97,13 +97,14 @@ struct Thresholds: Equatable, Codable {
 }
 
 enum SidebarSection: String, CaseIterable, Identifiable {
-    case forgotten, recentUnplayed, neverPlayed, prep, together
+    case suggestions, forgotten, recentUnplayed, neverPlayed, prep, together
     case distribution, usb, search, sessions, deleted
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
+        case .suggestions:    return "Suggested Playlists"
         case .forgotten:      return "Forgotten Favourites"
         case .recentUnplayed: return "Recently Added"
         case .neverPlayed:    return "Never Played"
@@ -119,6 +120,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
 
     var sfSymbol: String {
         switch self {
+        case .suggestions:    return "sparkles"
         case .forgotten:      return "clock.arrow.circlepath"
         case .recentUnplayed: return "cart"
         case .neverPlayed:    return "moon.zzz"
@@ -131,4 +133,14 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .deleted:        return "trash"
         }
     }
+}
+
+struct PlaylistSuggestion: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let kind: String
+    let description: String
+    let contentIDs: [String]
+    let rationale: String
+    let score: Double
 }

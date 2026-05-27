@@ -20,6 +20,7 @@ struct ContentView: View {
     @ViewBuilder
     private var surface: some View {
         switch section {
+        case .suggestions:    SuggestionsPanel()
         case .forgotten:      TrackTable(tracks: state.forgotten, kind: .forgotten)
         case .recentUnplayed: TrackTable(tracks: state.recentUnplayed, kind: .recentUnplayed)
         case .neverPlayed:    TrackTable(tracks: state.neverPlayed, kind: .neverPlayed)
@@ -31,6 +32,110 @@ struct ContentView: View {
         case .sessions:       SessionsTable()
         case .deleted:        DeletedTable()
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Suggestions surface - the headline feature
+// ---------------------------------------------------------------------------
+
+struct SuggestionsPanel: View {
+    @EnvironmentObject var state: AppState
+    var body: some View {
+        if state.suggestions.isEmpty {
+            EmptyState(message: "No suggestions yet. Plug in a CDJ USB and sync to seed.")
+        } else {
+            LazyVStack(spacing: 10) {
+                if let last = state.lastPlaylistResult {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(Theme.cyan)
+                        Text(last).font(Type.body).foregroundColor(Theme.ink)
+                        Spacer()
+                        Button("✕") { state.lastPlaylistResult = nil }
+                            .buttonStyle(.plain)
+                            .foregroundColor(Theme.ink3)
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .background(Theme.surface)
+                }
+                ForEach(state.suggestions) { s in
+                    SuggestionCard(suggestion: s)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+        }
+    }
+}
+
+struct SuggestionCard: View {
+    @EnvironmentObject var state: AppState
+    let suggestion: PlaylistSuggestion
+    @State private var hover = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(suggestion.name)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(Theme.ink)
+                        .lineLimit(2)
+                    Text(suggestion.description)
+                        .font(Type.body).foregroundColor(Theme.ink2)
+                }
+                Spacer()
+                Text("\(suggestion.contentIDs.count) TRACKS")
+                    .font(Type.micro).tracking(1.0)
+                    .foregroundColor(Theme.ink3)
+            }
+            Text(suggestion.rationale)
+                .font(Type.body).foregroundColor(Theme.ink3)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                createButton
+                Spacer()
+                kindBadge
+            }
+        }
+        .padding(12)
+        .background(hover ? Theme.hover : Theme.surface)
+        .onHover { hover = $0 }
+    }
+
+    private var createButton: some View {
+        let active = state.creatingPlaylistID == suggestion.id
+        return Button {
+            state.createPlaylist(from: suggestion)
+        } label: {
+            HStack(spacing: 6) {
+                if active {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "plus.rectangle.on.rectangle")
+                        .font(.system(size: 10, weight: .bold))
+                }
+                Text(active ? "CREATING…" : "CREATE IN REKORDBOX")
+                    .font(.system(size: 10, weight: .bold))
+                    .tracking(1.0)
+            }
+            .foregroundColor(.black)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(Theme.amber)
+            .cornerRadius(3)
+        }
+        .buttonStyle(.plain)
+        .disabled(state.creatingPlaylistID != nil)
+    }
+
+    private var kindBadge: some View {
+        Text(suggestion.kind.uppercased())
+            .font(Type.micro).tracking(0.8)
+            .foregroundColor(Theme.cyan)
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(Theme.cyan.opacity(0.16))
+            .cornerRadius(2)
     }
 }
 
